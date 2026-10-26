@@ -11,6 +11,64 @@ from app.models.department import Department
 router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 
 
+@router.get("/hiring-trends")
+def dashboard_hiring_trends(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in ("ADMIN", "HR", "MANAGER"):
+        raise HTTPException(
+            status_code=403,
+            detail="Dashboard access requires HR, Manager, or Admin",
+        )
+
+    from datetime import date
+
+    today = date.today()
+    current_month = today.year * 12 + today.month - 1
+    first_month = current_month - 5
+    start_date = date(first_month // 12, first_month % 12 + 1, 1)
+
+    rows = db.execute(
+        select(
+            func.year(Employee.hire_date),
+            func.month(Employee.hire_date),
+            func.count(Employee.id),
+        )
+        .where(
+            Employee.hire_date >= start_date,
+            Employee.hire_date <= today,
+        )
+        .group_by(
+            func.year(Employee.hire_date),
+            func.month(Employee.hire_date),
+        )
+    ).all()
+
+    counts = {
+        (int(year), int(month)): int(count)
+        for year, month, count in rows
+    }
+
+    monthly_hires = []
+    for offset in range(6):
+        month_index = first_month + offset
+        year = month_index // 12
+        month = month_index % 12 + 1
+        month_date = date(year, month, 1)
+        monthly_hires.append({
+            "month": month_date.strftime("%b"),
+            "year": year,
+            "hires": counts.get((year, month), 0),
+        })
+
+    return {
+        "metric": "monthly_hires",
+        "description": "Employees whose hire_date falls within each month",
+        "monthly_hires": monthly_hires,
+    }
+
+
 @router.get("/summary")
 def dashboard_summary(
     db: Session = Depends(get_db),
