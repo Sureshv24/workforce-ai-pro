@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -57,6 +57,9 @@ def record_risk_event(
             .limit(1)
         )
 
+        # Record meaningful score changes even when the risk category stays the same.
+        risk_score_change_threshold = 10.0
+
         if previous is None:
             event_type = "INITIAL_ASSESSMENT"
         elif previous.risk_level != prediction.risk_level:
@@ -66,6 +69,10 @@ def record_risk_event(
                 event_type = "RISK_REDUCED"
             else:
                 event_type = "RISK_CHANGED"
+        elif abs(
+            float(prediction.risk_score) - float(previous.risk_score)
+        ) >= risk_score_change_threshold:
+            event_type = "RISK_SCORE_CHANGED"
         else:
             event_type = "ASSESSMENT_UNCHANGED"
 
@@ -96,8 +103,8 @@ def record_risk_event(
                 else f"Employee ID {prediction.employee_id}"
             )
 
-            # Risk score is assumed to be a probability between 0 and 1.
-            risk_percentage = float(prediction.risk_score) * 100
+            # Stored risk scores already use the 0-100 percentage scale.
+            risk_percentage = float(prediction.risk_score)
 
             recipients = db.scalars(
                 select(User).where(

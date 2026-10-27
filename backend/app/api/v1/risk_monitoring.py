@@ -93,32 +93,68 @@ def risk_monitoring_summary(
 ):
     require_hr_access(current_user)
 
-    query = select(
-        AttritionPrediction.risk_level,
-        func.count(AttritionPrediction.id),
+    latest = latest_prediction_ids()
+
+    latest_query = (
+        select(
+            AttritionPrediction.id,
+            AttritionPrediction.employee_id,
+            AttritionPrediction.risk_level,
+            AttritionPrediction.risk_score,
+            AttritionPrediction.created_at,
+        )
+        .join(latest, AttritionPrediction.id == latest.c.prediction_id)
+        .where(AttritionPrediction.employee_id.is_not(None))
     )
 
     if department_id is not None:
-        query = (
-            query.join(
-                Employee,
-                AttritionPrediction.employee_id == Employee.id,
+        latest_query = latest_query.join(
+            Employee,
+            Employee.id == AttritionPrediction.employee_id,
+        ).where(Employee.department_id == department_id)
+
+    latest_rows = db.execute(latest_query).all()
+    counts = {level: 0 for level in RISK_LEVELS}
+    increasing_risk_count = 0
+    score_change_threshold = 10.0
+
+    for row in latest_rows:
+        if row.risk_level in counts:
+            counts[row.risk_level] += 1
+
+        previous = db.scalar(
+            select(AttritionPrediction)
+            .where(
+                AttritionPrediction.employee_id == row.employee_id,
+                or_(
+                    AttritionPrediction.created_at < row.created_at,
+                    and_(
+                        AttritionPrediction.created_at == row.created_at,
+                        AttritionPrediction.id < row.id,
+                    ),
+                ),
             )
-            .where(Employee.department_id == department_id)
+            .order_by(
+                AttritionPrediction.created_at.desc(),
+                AttritionPrediction.id.desc(),
+            )
+            .limit(1)
         )
 
-    rows = db.execute(query.group_by(AttritionPrediction.risk_level)).all()
-    counts = {level: 0 for level in RISK_LEVELS}
-
-    for level, count in rows:
-        if level in counts:
-            counts[level] = int(count)
+        if (
+            previous is not None
+            and float(row.risk_score) - float(previous.risk_score)
+            >= score_change_threshold
+        ):
+            increasing_risk_count += 1
 
     return {
-        "basis": "saved_predictions",
+        "basis": "latest_saved_prediction_per_employee",
         "department_id": department_id,
-        "total_predictions": sum(counts.values()),
+        "total_predictions": len(latest_rows),
         "risk_counts": counts,
+        "employees_with_increasing_risk": increasing_risk_count,
+        "increasing_risk_threshold_percentage_points": 10,
     }
 
 
@@ -133,6 +169,40 @@ def high_risk_employees(
 
     latest = latest_prediction_ids()
 
+    previous_id = (
+        select(AttritionPrediction.id)
+        .where(
+            AttritionPrediction.employee_id == Employee.id,
+            or_(
+                AttritionPrediction.created_at < latest.c.created_at,
+                and_(
+                    AttritionPrediction.created_at == latest.c.created_at,
+                    AttritionPrediction.id < latest.c.prediction_id,
+                ),
+            ),
+        )
+        .order_by(
+            AttritionPrediction.created_at.desc(),
+            AttritionPrediction.id.desc(),
+        )
+        .limit(1)
+        .correlate(Employee, latest)
+        .scalar_subquery()
+    )
+
+    previous_risk_score = (
+        select(AttritionPrediction.risk_score)
+        .where(AttritionPrediction.id == previous_id)
+        .scalar_subquery()
+        .label("previous_risk_score")
+    )
+    previous_risk_level = (
+        select(AttritionPrediction.risk_level)
+        .where(AttritionPrediction.id == previous_id)
+        .scalar_subquery()
+        .label("previous_risk_level")
+    )
+
     query = (
         select(
             AttritionPrediction.id,
@@ -145,6 +215,8 @@ def high_risk_employees(
             AttritionPrediction.risk_level,
             AttritionPrediction.predicted_attrition,
             AttritionPrediction.created_at,
+            previous_risk_score,
+            previous_risk_level,
         )
         .join(latest, AttritionPrediction.id == latest.c.prediction_id)
         .join(Employee, AttritionPrediction.employee_id == Employee.id)
@@ -176,6 +248,16 @@ def high_risk_employees(
                 "department_name": row.department_name,
                 "risk_score": row.risk_score,
                 "risk_level": row.risk_level,
+                "previous_risk_score": row.previous_risk_score,
+                "previous_risk_level": row.previous_risk_level,
+                "risk_score_change_percentage_points": (
+                    round(
+                        (float(row.risk_score) - float(row.previous_risk_score)),
+                        2,
+                    )
+                    if row.previous_risk_score is not None
+                    else None
+                ),
                 "predicted_attrition": row.predicted_attrition,
                 "predicted_at": row.created_at.isoformat(),
             }
@@ -198,13 +280,17 @@ def risk_monitoring_trends(
     start_dt = datetime.combine(start, time.min)
     end_dt = datetime.combine(today + timedelta(days=1), time.min)
 
+    latest = latest_prediction_ids()
+
     query = (
         select(
             func.date(AttritionPrediction.created_at).label("prediction_date"),
             AttritionPrediction.risk_level,
-            func.count(AttritionPrediction.id),
+            func.count(AttritionPrediction.id).label("prediction_count"),
         )
+        .join(latest, AttritionPrediction.id == latest.c.prediction_id)
         .where(
+            AttritionPrediction.employee_id.is_not(None),
             AttritionPrediction.created_at >= start_dt,
             AttritionPrediction.created_at < end_dt,
         )
@@ -245,7 +331,7 @@ def risk_monitoring_trends(
             buckets[day_key][level] = int(count)
 
     return {
-        "basis": "prediction_creation_date",
+        "basis": "latest_prediction_per_employee_by_date",
         "period": period,
         "period_start": start.isoformat(),
         "period_end": today.isoformat(),

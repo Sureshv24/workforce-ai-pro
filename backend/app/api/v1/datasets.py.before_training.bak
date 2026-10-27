@@ -1,0 +1,300 @@
+﻿import csv
+import io
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pandas as pd
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_current_user
+from app.db.session import get_db
+from app.models.user import User
+
+router = APIRouter(prefix="/datasets", tags=["Dataset Management"])
+
+ROOT = Path(__file__).resolve().parents[2]
+DATASET_DIR = ROOT / "ml" / "datasets"
+SAMPLE_DATASET = DATASET_DIR / "attrition_sample.csv"
+METADATA_FILE = DATASET_DIR / "dataset_metadata.json"
+
+FEATURE_COLUMNS = [
+    "age",
+    "monthly_income",
+    "years_at_company",
+    "job_satisfaction",
+    "work_life_balance",
+    "overtime",
+    "years_since_promotion",
+    "distance_from_home",
+]
+REQUIRED_COLUMNS = FEATURE_COLUMNS + ["attrition"]
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+def require_hr(user: User):
+    if user.role not in ("ADMIN", "HR"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin or HR permission required",
+        )
+
+
+def load_metadata():
+    if not METADATA_FILE.exists():
+        return []
+    try:
+        content = json.loads(METADATA_FILE.read_text(encoding="utf-8"))
+        return content if isinstance(content, list) else []
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def save_metadata(items):
+    DATASET_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = METADATA_FILE.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(items, indent=2),
+        encoding="utf-8",
+    )
+    temporary.replace(METADATA_FILE)
+
+
+def dataset_summary(path: Path, dataset_id: str, uploaded_at=None):
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        raise HTTPException(
+            status_code=422,
+            detail="CSV could not be read.",
+        ) from None
+
+    missing = [column for column in REQUIRED_COLUMNS if column not in df.columns]
+
+    return {
+        "id": dataset_id,
+        "name": path.name,
+        "rows": int(len(df)),
+        "columns": int(len(df.columns)),
+        "column_names": list(df.columns),
+        "missing_required_columns": missing,
+        "valid": not missing and len(df) > 0,
+        "uploaded_at": uploaded_at,
+        "size_bytes": path.stat().st_size,
+        "is_sample": path.name == SAMPLE_DATASET.name,
+    }
+
+
+@router.get("/")
+def list_datasets(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_hr(current_user)
+
+    items = []
+    if SAMPLE_DATASET.is_file():
+        items.append(
+            dataset_summary(
+                SAMPLE_DATASET,
+                "sample",
+                uploaded_at=None,
+            )
+        )
+
+    for metadata in load_metadata():
+        filename = metadata.get("filename", "")
+        path = (DATASET_DIR / filename).resolve()
+
+        if (
+            path.parent != DATASET_DIR.resolve()
+            or not path.is_file()
+            or path == SAMPLE_DATASET
+        ):
+            continue
+
+        items.append(
+            dataset_summary(
+                path,
+                metadata.get("id", filename),
+                metadata.get("uploaded_at"),
+            )
+        )
+
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/validate")
+async def validate_dataset(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_hr(current_user)
+
+    if not file.filename or Path(file.filename).suffix.lower() != ".csv":
+        raise HTTPException(status_code=415, detail="Upload a CSV file.")
+
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="CSV file must be 10 MB or smaller.",
+        )
+
+    try:
+        text = content.decode("utf-8-sig")
+        df = pd.read_csv(io.StringIO(text))
+    except Exception:
+        raise HTTPException(
+            status_code=422,
+            detail="CSV is invalid or could not be decoded as UTF-8.",
+        ) from None
+    finally:
+        await file.close()
+
+    missing = [column for column in REQUIRED_COLUMNS if column not in df.columns]
+    issues = []
+
+    if df.empty:
+        issues.append("Dataset contains no data rows.")
+
+    if missing:
+        issues.append("Missing required columns: " + ", ".join(missing))
+
+    if "attrition" in df.columns and not df.empty:
+        labels = set(df["attrition"].dropna().astype(str).str.strip())
+        if not labels.issubset({"0", "1"}):
+            issues.append("attrition must contain only 0 and 1.")
+        elif labels != {"0", "1"}:
+            issues.append("Training data must contain both attrition classes.")
+
+    for column in FEATURE_COLUMNS:
+        if column not in df.columns:
+            continue
+        if column != "overtime":
+            values = pd.to_numeric(df[column], errors="coerce")
+            if values.isna().any():
+                issues.append(f"{column} contains missing or non-numeric values.")
+        else:
+            overtime = set(
+                df[column].dropna().astype(str).str.strip().str.lower()
+            )
+            if not overtime.issubset({"yes", "no"}):
+                issues.append("overtime must contain Yes or No values.")
+
+    return {
+        "filename": Path(file.filename).name,
+        "rows": int(len(df)),
+        "columns": int(len(df.columns)),
+        "column_names": list(df.columns),
+        "missing_required_columns": missing,
+        "valid": len(issues) == 0,
+        "issues": issues,
+    }
+
+
+@router.post("/", status_code=status.HTTP_201_CREATED)
+async def upload_dataset(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_hr(current_user)
+
+    if not file.filename or Path(file.filename).suffix.lower() != ".csv":
+        raise HTTPException(status_code=415, detail="Upload a CSV file.")
+
+    original_name = Path(file.filename).name
+    if not original_name or original_name in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    await file.close()
+
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="CSV file must be 10 MB or smaller.",
+        )
+
+    try:
+        df = pd.read_csv(io.BytesIO(content), encoding="utf-8-sig")
+    except Exception:
+        raise HTTPException(
+            status_code=422,
+            detail="CSV is invalid or could not be decoded as UTF-8.",
+        ) from None
+
+    missing = [column for column in REQUIRED_COLUMNS if column not in df.columns]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Required columns are missing.", "missing": missing},
+        )
+
+    if df.empty:
+        raise HTTPException(status_code=422, detail="Dataset contains no data rows.")
+
+    if df["attrition"].isna().any():
+        raise HTTPException(status_code=422, detail="attrition cannot be empty.")
+
+    labels = set(df["attrition"].astype(str).str.strip())
+    if not labels.issubset({"0", "1"}) or labels != {"0", "1"}:
+        raise HTTPException(
+            status_code=422,
+            detail="attrition must contain both classes: 0 and 1.",
+        )
+
+    for column in FEATURE_COLUMNS:
+        if column == "overtime":
+            values = set(df[column].dropna().astype(str).str.strip().str.lower())
+            if df[column].isna().any() or not values.issubset({"yes", "no"}):
+                raise HTTPException(
+                    status_code=422,
+                    detail="overtime must contain only Yes or No values.",
+                )
+        else:
+            values = pd.to_numeric(df[column], errors="coerce")
+            if values.isna().any():
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{column} must contain numeric values without blanks.",
+                )
+            df[column] = values
+
+    DATASET_DIR.mkdir(parents=True, exist_ok=True)
+
+    import uuid
+
+    dataset_id = uuid.uuid4().hex
+    filename = f"uploaded_{dataset_id}.csv"
+    destination = DATASET_DIR / filename
+
+    # Save normalized CSV content under a generated name, not the user's filename.
+    df.to_csv(destination, index=False)
+
+    metadata = load_metadata()
+    metadata.append({
+        "id": dataset_id,
+        "filename": filename,
+        "original_name": original_name,
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "uploaded_by": current_user.id,
+    })
+
+    try:
+        save_metadata(metadata)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Dataset was not registered. Please try again.",
+        ) from None
+
+    return dataset_summary(
+        destination,
+        dataset_id,
+        uploaded_at=metadata[-1]["uploaded_at"],
+    )

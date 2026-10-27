@@ -9,13 +9,21 @@ import Departments from "./pages/Departments";
 import PredictionHistory from "./pages/PredictionHistory";
 import AIRiskMonitoring from "./pages/AIRiskMonitoring";
 import Attendance from "./pages/Attendance";
+import ShiftManagement from "./pages/ShiftManagement";
 import LeaveManagement from "./pages/LeaveManagement";
+import LeaveBalances from "./pages/LeaveBalances";
+import Payroll from "./pages/Payroll";
+import Notifications from "./pages/Notifications";
+import Chat from "./pages/Chat";
+import Documents from "./pages/Documents";
+import DatasetManagement from "./pages/DatasetManagement";
 import { getPredictionHistory } from "./api/predictionHistory";
 import { getHiringTrends } from "./api/hiringTrends";
 import {
-  LayoutDashboard, Users, Building2, BrainCircuit, History,
+  LayoutDashboard, Users, Building2, BrainCircuit, History, Database,
   CalendarDays, Settings, Search, Bell, Menu, X, TrendingUp, TrendingDown,
-  UserMinus, UserCheck, Activity, ChevronDown, ArrowUpRight
+  UserMinus, UserCheck, Activity, ChevronDown, ArrowUpRight,
+  Wallet, MessageCircle, Files
 } from "lucide-react";
 
 const initialStats = [
@@ -49,7 +57,14 @@ const nav = [
   { label: "Prediction History", icon: History },
   { label: "AI Risk Monitoring", icon: Activity },
   { label: "Attendance", icon: Activity },
+  { label: "Shift Management", icon: CalendarDays },
   { label: "Leave Management", icon: CalendarDays },
+  { label: "Leave Balances", icon: CalendarDays },
+  { label: "Payroll", icon: Wallet },
+  { label: "Notifications", icon: Bell },
+  { label: "Chat", icon: MessageCircle },
+  { label: "Documents", icon: Files },
+  { label: "Dataset Management", icon: Database },
 ];
 
 function App() {
@@ -462,7 +477,7 @@ function App() {
         <div className="page-content">
           {page === "Overview" && <>
             <section className="welcome-row">
-              <div><div className="eyebrow"><span/> WORKFORCE ANALYTICS</div><h1>Good afternoon, Admin <span>✦</span></h1><p>Here's what's happening with your workforce today.</p></div>
+              <div><div className="eyebrow"><span/> WORKFORCE ANALYTICS</div><h1>Good afternoon, Admin <span>âœ¦</span></h1><p>Here's what's happening with your workforce today.</p></div>
               <select
                 value={dashboardPeriod}
                 onChange={(event) => setDashboardPeriod(event.target.value)}
@@ -589,7 +604,7 @@ function App() {
               </article>
 
               <article className="panel department-panel">
-                <div className="panel-heading"><div><h2>Department overview</h2><p>Employees by department</p></div><button className="dots-button">•••</button></div>
+                <div className="panel-heading"><div><h2>Department overview</h2><p>Employees by department</p></div><button className="dots-button">â€¢â€¢â€¢</button></div>
                 <div className="department-list">
                   {(dashboardSummary?.department_headcount || []).map((d, i, rows) => {
                     const maxCount = Math.max(
@@ -734,7 +749,7 @@ function App() {
               <div className="table-bottom"><span>Showing {filtered.length} live employee records</span><span className="sample-note">Live employee data connected to the API</span></div>
             </section>
 
-            <footer className="footer"><span>© 2026 WorkForce AI Pro</span><span>Workforce Intelligence Platform <span className="footer-dot">•</span> v1.0.0</span></footer>
+            <footer className="footer"><span>Â© 2026 WorkForce AI Pro</span><span>Workforce Intelligence Platform <span className="footer-dot">â€¢</span> v1.0.0</span></footer>
           </>}
 
           {isHR && page === "Employees" && <Employees /> }
@@ -750,7 +765,14 @@ function App() {
           {page === "Prediction History" && <PredictionHistory />}
 
           {page === "Attendance" && <Attendance />}
+          {page === "Shift Management" && <ShiftManagement currentUser={currentUser} />}
           {page === "Leave Management" && <LeaveManagement currentUser={currentUser} />}
+        {page === "Leave Balances" && <LeaveBalances currentUser={currentUser} />}
+          {page === "Payroll" && <Payroll currentUser={currentUser} />}
+          {page === "Notifications" && <Notifications currentUser={currentUser} />}
+          {page === "Chat" && <Chat currentUser={currentUser} />}
+          {page === "Documents" && <Documents currentUser={currentUser} />}
+          {page === "Dataset Management" && <DatasetManagement currentUser={currentUser} />}
 
           {page === "Settings" && <section className="panel page-panel"><div className="panel-heading"><div><h2>Settings</h2><p>Application connection details.</p></div></div><div className="settings-list"><div><strong>Backend API</strong><span>http://127.0.0.1:8000</span></div><div><strong>Frontend origin</strong><span>http://localhost:5173</span></div><div><strong>Authentication</strong><span>JWT bearer token in localStorage</span></div></div><p className="disclaimer">Do not store production secrets in frontend code. Use environment configuration for deployment.</p></section>}
         </div>
@@ -760,3 +782,7 @@ function App() {
 }
 
 export default App;
+
+
+
+

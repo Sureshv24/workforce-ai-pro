@@ -1,0 +1,762 @@
+﻿import { useEffect, useState } from "react";
+import api from "./api/client";
+import { getEmployees } from "./api/employees";
+import { getDepartments } from "./api/departments";
+import { logout } from "./api/auth";
+import Login from "./pages/Login";
+import Employees from "./pages/Employees";
+import Departments from "./pages/Departments";
+import PredictionHistory from "./pages/PredictionHistory";
+import AIRiskMonitoring from "./pages/AIRiskMonitoring";
+import Attendance from "./pages/Attendance";
+import LeaveManagement from "./pages/LeaveManagement";
+import { getPredictionHistory } from "./api/predictionHistory";
+import { getHiringTrends } from "./api/hiringTrends";
+import {
+  LayoutDashboard, Users, Building2, BrainCircuit, History,
+  CalendarDays, Settings, Search, Bell, Menu, X, TrendingUp, TrendingDown,
+  UserMinus, UserCheck, Activity, ChevronDown, ArrowUpRight
+} from "lucide-react";
+
+const initialStats = [
+  { label: "Total Employees", value: "1,248", change: "+12.5%", up: true, icon: Users },
+  { label: "Attrition Rate", value: "", change: "", up: false, icon: UserMinus },
+  { label: "High Risk Employees", value: "86", change: "+4.2%", up: false, icon: Activity },
+  { label: "Retention Rate", value: "", change: "", up: true, icon: UserCheck },
+];
+
+const departments = [
+  { name: "Engineering", count: 420, rate: 10 },
+  { name: "Sales & Marketing", count: 280, rate: 16 },
+  { name: "Human Resources", count: 95, rate: 7 },
+  { name: "Finance", count: 160, rate: 9 },
+  { name: "Operations", count: 293, rate: 13 },
+];
+
+const employees = [
+  { name: "Arun Kumar", role: "Software Engineer", dept: "Engineering", risk: "High", score: 87 },
+  { name: "Priya Sharma", role: "Sales Executive", dept: "Sales", risk: "Medium", score: 64 },
+  { name: "Rahul Das", role: "Data Analyst", dept: "Engineering", risk: "High", score: 91 },
+  { name: "Divya R", role: "HR Specialist", dept: "Human Resources", risk: "Low", score: 18 },
+  { name: "Karthik M", role: "Accountant", dept: "Finance", risk: "Medium", score: 52 },
+];
+
+const nav = [
+  { label: "Overview", icon: LayoutDashboard },
+  { label: "Employees", icon: Users },
+  { label: "Departments", icon: Building2 },
+  { label: "AI Predictions", icon: BrainCircuit },
+  { label: "Prediction History", icon: History },
+  { label: "AI Risk Monitoring", icon: Activity },
+  { label: "Attendance", icon: Activity },
+  { label: "Leave Management", icon: CalendarDays },
+];
+
+function App() {
+  const [page, setPage] = useState("Overview");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [currentUser, setCurrentUser] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("user") || "null");
+    } catch {
+      return null;
+    }
+  });
+
+  const isHR = ["ADMIN", "HR"].includes(
+    String(currentUser?.role || "").toUpperCase()
+  );
+
+  useEffect(() => {
+    if (!isHR && ["Employees", "Departments", "AI Risk Monitoring"].includes(page)) {
+      setPage("Overview");
+    }
+  }, [isHR, page]);
+
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authChecking, setAuthChecking] = useState(
+    Boolean(localStorage.getItem("access_token"))
+  );
+
+  useEffect(() => {
+    if (!localStorage.getItem("access_token")) {
+      setAuthChecking(false);
+      return;
+    }
+
+    api.get("/auth/me")
+      .then((response) => {
+        setCurrentUser(response.data);
+        localStorage.setItem("user", JSON.stringify(response.data));
+        setIsAuthenticated(true);
+      })
+      .catch(() => {
+        logout();
+        setCurrentUser(null);
+        setIsAuthenticated(false);
+      })
+      .finally(() => setAuthChecking(false));
+  }, []);
+  const [dashboardSummary, setDashboardSummary] = useState(null);
+  const [dashboardPeriod, setDashboardPeriod] = useState("last_30_days");
+  const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [dashboardError, setDashboardError] = useState("");
+  const [predictionSummary, setPredictionSummary] = useState(null);
+  const [predictionSummaryError, setPredictionSummaryError] = useState("");
+  const [liveEmployees, setLiveEmployees] = useState([]);
+  const [liveDepartments, setLiveDepartments] = useState([]);
+  const [employeeListLoading, setEmployeeListLoading] = useState(false);
+  const [employeeListError, setEmployeeListError] = useState("");
+  const [savedPredictions, setSavedPredictions] = useState([]);
+  const [hiringTrendData, setHiringTrendData] = useState([]);
+  const [hiringTrendLoading, setHiringTrendLoading] = useState(false);
+  const [hiringTrendError, setHiringTrendError] = useState("");
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    let cancelled = false;
+    setHiringTrendLoading(true);
+    setHiringTrendError("");
+
+    getHiringTrends()
+      .then((data) => {
+        if (!cancelled) {
+          setHiringTrendData(
+            Array.isArray(data.monthly_hires) ? data.monthly_hires : []
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHiringTrendError("Unable to load hiring trends.");
+          setHiringTrendData([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setHiringTrendLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [isAuthenticated]);
+
+  const chartMaxHires = Math.max(
+    1,
+    ...hiringTrendData.map((item) => Number(item.hires) || 0)
+  );
+
+  const chartPoints = hiringTrendData.map((item, index, rows) => ({
+    ...item,
+    x: rows.length > 1 ? index * 600 / (rows.length - 1) : 300,
+    y: 185 - ((Number(item.hires) || 0) / chartMaxHires) * 150,
+    hires: Number(item.hires) || 0,
+  }));
+
+  const chartLine = chartPoints.map((point) => `${point.x},${point.y}`).join(" ");
+  const chartArea = chartPoints.length ? `0,205 ${chartLine} 600,205` : "";
+  const chartYAxisLabels = [
+    chartMaxHires,
+    chartMaxHires * 0.75,
+    chartMaxHires * 0.5,
+    chartMaxHires * 0.25,
+    0,
+  ].map((value) => Number.isInteger(value) ? value : Number(value.toFixed(1)));
+
+
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    let cancelled = false;
+    setDashboardLoading(true);
+    setDashboardError("");
+
+    api.get("/dashboard/summary", { params: { period: dashboardPeriod } })
+      .then((response) => {
+        if (!cancelled) setDashboardSummary(response.data);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setDashboardError(
+            error.response?.data?.detail ||
+            "Unable to load live dashboard data."
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setDashboardLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, dashboardPeriod]);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    let cancelled = false;
+
+    getPredictionHistory({ page: 1, page_size: 100, risk_level: "High" })
+      .then((response) => {
+        if (!cancelled) {
+          setPredictionSummary(response.data);
+          setPredictionSummaryError("");
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setPredictionSummary(null);
+          setPredictionSummaryError(
+            error.response?.data?.detail ||
+            "Saved prediction data is unavailable."
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated]);
+
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    let cancelled = false;
+    setEmployeeListLoading(true);
+    setEmployeeListError("");
+
+    Promise.all([
+      getEmployees({ page: 1, page_size: 100 }),
+      getPredictionHistory({ page: 1, page_size: 100 }),
+      getDepartments({ page: 1, page_size: 100 }),
+    ])
+      .then(([employeeResponse, predictionResponse, departmentResponse]) => {
+        if (cancelled) return;
+
+        const employeeData = employeeResponse.data;
+        const predictionData = predictionResponse.data;
+
+        setLiveEmployees(
+          Array.isArray(employeeData)
+            ? employeeData
+            : employeeData.items || employeeData.results || []
+        );
+        setSavedPredictions(
+          Array.isArray(predictionData.items)
+            ? predictionData.items
+            : []
+        );
+        const departmentData = departmentResponse.data;
+        setLiveDepartments(
+          Array.isArray(departmentData)
+            ? departmentData
+            : departmentData.items || departmentData.results || []
+        );
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setEmployeeListError(
+            error.response?.data?.detail ||
+            "Unable to load employees or saved predictions."
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setEmployeeListLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated]);
+
+  const [search, setSearch] = useState("");
+  const [period, setPeriod] = useState("Last 30 days");
+  const [prediction, setPrediction] = useState(null);
+  const [form, setForm] = useState({
+    employee_id: 1,
+    age: 29,
+    monthly_income: 4500,
+    years_at_company: 2,
+    job_satisfaction: 2,
+    work_life_balance: 2,
+    overtime: "Yes",
+    years_since_promotion: 2,
+    distance_from_home: 15,
+  });
+
+  const latestPredictionByEmployee = new Map();
+  [...savedPredictions]
+    .sort((a, b) =>
+      new Date(b.created_at || 0) - new Date(a.created_at || 0)
+    )
+    .forEach((item) => {
+      if (item.employee_id != null &&
+          !latestPredictionByEmployee.has(Number(item.employee_id))) {
+        latestPredictionByEmployee.set(Number(item.employee_id), item);
+      }
+    });
+
+  const filtered = liveEmployees
+    .filter((employee) =>
+      `${employee.full_name || ""} ${employee.employee_code || ""} ${employee.job_title || ""}`
+        .toLowerCase()
+        .includes(search.toLowerCase())
+    )
+    .map((employee) => {
+      const latest = latestPredictionByEmployee.get(Number(employee.id));
+      return {
+        id: employee.id,
+        name: employee.full_name || employee.employee_code || `Employee ${employee.id}`,
+        role: employee.job_title || "?",
+        dept:
+            employee.department?.name ||
+            employee.department_name ||
+            liveDepartments.find(
+              (department) => Number(department.id) === Number(employee.department_id)
+            )?.name ||
+            "Unassigned",
+        risk: latest?.risk_level || "No prediction",
+        score: latest?.risk_score == null ? null : Number(latest.risk_score),
+      };
+    });
+
+  async function predictAttrition(event) {
+    event.preventDefault();
+    setPrediction({ loading: true });
+    try {
+      const token = localStorage.getItem("access_token");
+      const response = await fetch("http://127.0.0.1:8000/api/v1/predictions/attrition", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          ...form,
+          employee_id: Number(form.employee_id),
+          age: Number(form.age),
+          monthly_income: Number(form.monthly_income),
+          years_at_company: Number(form.years_at_company),
+          job_satisfaction: Number(form.job_satisfaction),
+          work_life_balance: Number(form.work_life_balance),
+          years_since_promotion: Number(form.years_since_promotion),
+          distance_from_home: Number(form.distance_from_home),
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Prediction request failed");
+      setPrediction({ ...data, loading: false });
+    } catch (error) {
+      setPrediction({ error: error.message, loading: false });
+    }
+  }
+
+  if (authChecking) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        Checking authentication...
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <Login
+        onLogin={(user) => {
+          setCurrentUser(user);
+          setIsAuthenticated(true);
+        }}
+      />
+    );
+  }
+
+  return (
+    <div className="app-shell">
+      <aside className={`sidebar ${sidebarOpen ? "sidebar-open" : ""}`}>
+        <div className="brand">
+          <div className="brand-icon"><BrainCircuit size={25}/></div>
+          <div><strong>WorkForce<span> AI</span></strong><small>PRO INTELLIGENCE</small></div>
+          <button className="mobile-close" onClick={() => setSidebarOpen(false)}><X/></button>
+        </div>
+
+        <div className="workspace-label">WORKSPACE</div>
+        <nav>
+          {nav.filter(item => isHR || !["Employees", "Departments", "AI Risk Monitoring"].includes(item.label)).map(item => (
+            <button key={item.label}
+              className={`nav-item ${page === item.label ? "active" : ""}`}
+              onClick={() => { setPage(item.label); setSidebarOpen(false); }}>
+              <item.icon size={19}/><span>{item.label}</span>
+              {item.label === "AI Predictions" && <span className="nav-new">AI</span>}
+            </button>
+          ))}
+        </nav>
+
+        <div className="workspace-label settings-label">PREFERENCES</div>
+        <button className="nav-item" onClick={() => setPage("Settings")}><Settings size={19}/><span>Settings</span></button>
+
+        <div className="sidebar-bottom">
+          <div className="upgrade-card">
+            <div className="upgrade-icon"><BrainCircuit size={21}/></div>
+            <strong>Workforce intelligence</strong>
+            <p>Turn workforce data into smarter decisions.</p>
+          </div>
+          <div className="profile">
+            <div className="avatar">
+              {(currentUser?.full_name || currentUser?.email || "SV")
+                .slice(0, 2)
+                .toUpperCase()}
+            </div>
+            <div className="profile-info">
+              <strong>
+                {currentUser?.full_name ||
+                  currentUser?.name ||
+                  currentUser?.email?.split("@")[0] ||
+                  "User"}
+              </strong>
+              <small>
+                {{
+                  ADMIN: "Administrator",
+                  HR: "HR",
+                  EMPLOYEE: "Employee",
+                }[String(currentUser?.role || "").toUpperCase()] ||
+                  currentUser?.role ||
+                  "User"}
+              </small>
+            </div>
+            <ChevronDown size={17}/>
+          </div>
+        </div>
+      </aside>
+
+      {sidebarOpen && <button className="overlay" onClick={() => setSidebarOpen(false)} aria-label="Close menu"/>}
+
+      <main className="main-area">
+        <header className="topbar">
+          <div className="topbar-left">
+            <button className="menu-button" onClick={() => setSidebarOpen(true)}><Menu/></button>
+            <div><div className="breadcrumb">Workspace <span>/</span> {page}</div><div className="topbar-heading">{page === "Overview" ? "Workforce Overview" : page}</div></div>
+          </div>
+          <div className="topbar-right">
+            <div className="system-status"><span/> System operational</div>
+            <button className="icon-button notification" aria-label="Notifications"><Bell size={19}/><i/></button>
+            <button
+              type="button"
+              className="top-avatar"
+              title="Log out"
+              onClick={() => {
+                logout();
+                setCurrentUser(null);
+                setIsAuthenticated(false);
+                setPage("Overview");
+              }}
+            >
+              {(currentUser?.full_name || currentUser?.email || "SV")
+                .slice(0, 2)
+                .toUpperCase()}
+            </button>
+          </div>
+        </header>
+
+        <div className="page-content">
+          {page === "Overview" && <>
+            <section className="welcome-row">
+              <div><div className="eyebrow"><span/> WORKFORCE ANALYTICS</div><h1>Good afternoon, Admin <span>✦</span></h1><p>Here's what's happening with your workforce today.</p></div>
+              <select
+                value={dashboardPeriod}
+                onChange={(event) => setDashboardPeriod(event.target.value)}
+                className="period-select"
+                aria-label="Dashboard reporting period"
+              >
+                <option value="last_30_days">Last 30 days</option>
+                <option value="month_to_date">Month to date</option>
+                <option value="last_90_days">Last 90 days</option>
+                <option value="year_to_date">Year to date</option>
+              </select>
+            </section>
+
+            <section className="stat-grid">
+              {initialStats.map((s) => {
+                let value = "Not available";
+                let note = "Not provided by API";
+                let changeClass = "";
+
+                if (s.label === "Total Employees") {
+                  value = dashboardSummary
+                    ? String(dashboardSummary.total_employees ?? 0)
+                    : dashboardLoading ? "Loading..." : "?";
+                  note = dashboardError || "Live database count";
+                } else if (
+                  s.label === "Attrition Rate" ||
+                  s.label === "Retention Rate"
+                ) {
+                  const analytics = dashboardSummary?.attrition_analytics;
+                  const metricKey =
+                    s.label === "Attrition Rate"
+                      ? "attrition_rate_pct"
+                      : "retention_rate_pct";
+                  const metric = analytics?.[metricKey];
+
+                  if (!dashboardSummary) {
+                    value = dashboardLoading ? "Loading..." : "Unavailable";
+                    note = dashboardError || "Workforce analytics unavailable";
+                  } else if (!analytics) {
+                    value = "Unavailable";
+                    note =
+                      "Analytics not returned by the backend. Restart FastAPI if needed.";
+                  } else if (!analytics.data_complete) {
+                    const dataIssues = [];
+                    if (analytics.missing_hire_date_count) {
+                      dataIssues.push(
+                        `${analytics.missing_hire_date_count} employee(s) missing hire dates`
+                      );
+                    }
+                    if (analytics.inactive_missing_exit_date_count) {
+                      dataIssues.push(
+                        `${analytics.inactive_missing_exit_date_count} inactive employee(s) missing exit dates`
+                      );
+                    }
+                    if (analytics.status_date_conflict_count) {
+                      dataIssues.push(
+                        `${analytics.status_date_conflict_count} active/on-leave record(s) have exit dates`
+                      );
+                    }
+                    if (analytics.invalid_date_order_count) {
+                      dataIssues.push(
+                        `${analytics.invalid_date_order_count} record(s) have an exit date before hire date`
+                      );
+                    }
+                    value = "N/A";
+                    note = `Incomplete employment history: ${
+                      dataIssues.join("; ") || "records need review"
+                    }.`;
+                  } else if (metric == null) {
+                    value = "N/A";
+                    note =
+                      s.label === "Attrition Rate"
+                        ? "No average headcount available for this reporting period."
+                        : "No opening workforce cohort available for this reporting period.";
+                  } else {
+                    value = `${Number(metric).toFixed(2)}%`;
+                    note =
+                      `${analytics.period_label || "Reporting period"}: ` +
+                      `${analytics.period_start} to ${analytics.period_end}`;
+                  }
+                } else if (s.label === "High Risk Employees") {
+                  value = predictionSummary
+                    ? String(predictionSummary.total ?? 0)
+                    : predictionSummaryError ? "Unavailable" : "Loading...";
+                  note = predictionSummaryError ||
+                    "Saved high-risk prediction records; not unique employees";
+                } else if (!dashboardSummary && dashboardLoading) {
+                  value = "Loading...";
+                  note = "Loading dashboard data";
+                }
+
+                return (
+                  <article className="stat-card" key={s.label}>
+                    <div className="stat-top">
+                      <span>{s.label}</span>
+                      <div className="stat-icon"><s.icon size={20}/></div>
+                    </div>
+                    <div className="stat-value">{value}</div>
+                    <div className="stat-footer">
+                      <span className={changeClass}>{note}</span>
+                    </div>
+                  </article>
+                );
+              })}
+            </section>
+
+            <section className="middle-grid">
+              <article className="panel trend-panel">
+                <div className="panel-heading"><div><h2>Workforce trends</h2><p>Monthly employee hiring activity</p></div><button className="subtle-button">Monthly <ChevronDown size={15}/></button></div>
+                <div className="chart-legend"><span><i className="legend-blue"/> Monthly hires</span></div>
+                <div className="chart">
+                  <div className="y-labels">{chartYAxisLabels.map((value, index) => <span key={index}>{value}</span>)}</div>
+                  <div className="chart-main">
+                    {[0,1,2,3,4].map(n=><div className="gridline" key={n}/>)}
+                    <svg viewBox="0 0 600 205" preserveAspectRatio="none" className="chart-svg" role="img" aria-label="Monthly employee hiring counts">
+        {chartPoints.length > 0 && <polyline points={chartLine} fill="none" stroke="#5267ed" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />}
+        {chartPoints.length > 0 && chartPoints.length > 1 && <polygon points={chartArea} fill="#5267ed" fillOpacity="0.12" />}
+        {chartPoints.map((point) => <circle key={`${point.year}-${point.month}`} cx={point.x} cy={point.y} r="4" fill="#5267ed" stroke="white" strokeWidth="2"><title>{point.month} {point.year}: {point.hires} hires</title></circle>)}
+      </svg>
+                    <div className="x-labels">{chartPoints.map(point => <span key={`${point.year}-${point.month}`}>{point.month.slice(0, 3)}</span>)}</div>
+                  </div>
+                </div>
+                <div className="chart-note"><span className="note-dot"/>{hiringTrendLoading ? "Loading hiring analytics..." : hiringTrendError || "Actual hires by month, based on recorded hire dates."}</div>
+              </article>
+
+              <article className="panel department-panel">
+                <div className="panel-heading"><div><h2>Department overview</h2><p>Employees by department</p></div><button className="dots-button">•••</button></div>
+                <div className="department-list">
+                  {(dashboardSummary?.department_headcount || []).map((d, i, rows) => {
+                    const maxCount = Math.max(
+                      1,
+                      ...rows.map((item) => Number(item.employee_count) || 0)
+                    );
+                    const count = Number(d.employee_count) || 0;
+
+                    return (
+                      <div className="department-row" key={d.department_id}>
+                        <div className={`department-mark mark-${i % 5}`}>
+                          {(d.department_name || "?")[0]}
+                        </div>
+                        <div className="department-details">
+                          <div className="department-label">
+                            <strong>{d.department_name}</strong>
+                            <span>{count}</span>
+                          </div>
+                          <div className="progress-track">
+                            <div
+                              style={{ width: `${(count / maxCount) * 100}%` }}
+                              className={`progress-fill fill-${i % 5}`}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {!dashboardLoading &&
+                    !dashboardError &&
+                    dashboardSummary?.department_headcount?.length === 0 && (
+                      <div className="empty-state">No departments found.</div>
+                    )}
+                  {dashboardLoading && (
+                    <div className="empty-state">Loading departments...</div>
+                  )}
+                  {dashboardError && (
+                    <div className="empty-state">{dashboardError}</div>
+                  )}
+                </div>
+                <button className="view-all" onClick={() => setPage("Departments")}>View all departments <ArrowUpRight size={16}/></button>
+              </article>
+            </section>
+
+
+            <section className="panel page-panel">
+              <div className="panel-heading">
+                <div>
+                  <h2>Employee exit history</h2>
+                  <p>Recorded exits for the selected reporting period</p>
+                </div>
+                <span className="model-badge">EXIT HISTORY</span>
+              </div>
+
+              {!dashboardSummary?.attrition_analytics ? (
+                <div className="empty-state">
+                  {dashboardLoading
+                    ? "Loading employee exit history..."
+                    : dashboardError || "Employee exit history is unavailable."}
+                </div>
+              ) : (() => {
+                const analytics = dashboardSummary.attrition_analytics;
+                const points = Array.isArray(analytics.exit_trend)
+                  ? analytics.exit_trend
+                  : [];
+                const maxExits = Math.max(
+                  1,
+                  ...points.map((point) => Number(point.exits) || 0)
+                );
+
+                return (
+                  <>
+                    {!analytics.exit_history_complete && (
+                      <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                        Exit history is incomplete. The chart includes recorded exit dates only.
+                        {analytics.inactive_missing_exit_date_count > 0
+                          ? ` ${analytics.inactive_missing_exit_date_count} inactive employee(s) have no exit date.`
+                          : ""}
+                        {analytics.status_date_conflict_count > 0
+                          ? ` ${analytics.status_date_conflict_count} active/on-leave record(s) have an exit date.`
+                          : ""}
+                        {analytics.invalid_date_order_count > 0
+                          ? ` ${analytics.invalid_date_order_count} record(s) have an exit date before hire date.`
+                          : ""}
+                      </div>
+                    )}
+
+                    <div className="overflow-x-auto">
+                      <div className="flex h-56 min-w-[760px] items-end gap-1 border-b border-slate-100 pb-2">
+                        {points.map((point, index) => {
+                          const count = Number(point.exits) || 0;
+                          const height =
+                            count === 0
+                              ? 2
+                              : Math.max(8, (count / maxExits) * 100);
+
+                          return (
+                            <div
+                              key={`${point.date}-${index}`}
+                              title={`${point.label}: ${count} recorded exit(s)`}
+                              className="flex h-full min-w-0 flex-1 flex-col items-center justify-end gap-1"
+                            >
+                              <span className="text-xs text-slate-500">{count}</span>
+                              <div
+                                className="w-full max-w-8 rounded-t bg-indigo-500"
+                                style={{ height: `${height}%` }}
+                              />
+                              <span className="w-full truncate text-center text-[10px] text-slate-500">
+                                {point.label}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {points.length === 0 && (
+                      <div className="empty-state">No trend buckets are available for this period.</div>
+                    )}
+
+                    {analytics.exits_during_period === 0 &&
+                      analytics.exit_history_complete && (
+                        <p className="mt-3 text-sm text-slate-500">
+                          No recorded exits during this reporting period.
+                        </p>
+                      )}
+
+                    <p className="mt-3 text-xs text-slate-500">
+                      {analytics.period_label}: {analytics.period_start} to {analytics.period_end}.
+                      {' '}Counts use recorded exit dates; incomplete records are flagged above.
+                    </p>
+                  </>
+                );
+              })()}
+            </section>
+
+            <section className="panel employee-panel">
+              <div className="panel-heading employee-heading"><div><h2>Employee risk overview</h2><p>Live employee records and latest saved predictions</p></div><div className="table-actions"><div className="search-box"><Search size={17}/><input placeholder="Search employees..." value={search} onChange={e=>setSearch(e.target.value)}/></div><button className="subtle-button" onClick={()=>setPage("Employees")}>View all <ArrowUpRight size={15}/></button></div></div>
+              <div className="table-scroll"><table><thead><tr><th>EMPLOYEE</th><th>DEPARTMENT</th><th>ATTRITION RISK</th><th>RISK SCORE</th><th/></tr></thead><tbody>
+                {filtered.map((e,i)=><tr key={e.id}><td><div className="employee-cell"><div className={`employee-avatar av-${i%5}`}>{e.name.split(" ").map(x=>x[0]).join("").slice(0,2)}</div><div><strong>{e.name}</strong><small>{e.role}</small></div></div></td><td>{e.dept}</td><td>{e.risk === "No prediction" ? <span>No prediction yet</span> : <span className={`risk-pill risk-${e.risk.toLowerCase()}`}><i/>{e.risk} risk</span>}</td><td>{e.score == null ? "?" : <div className="risk-score"><div className="mini-track"><div style={{width:`${Math.max(0,Math.min(100,e.score))}%`}} className={`mini-fill ${e.risk.toLowerCase()}`}/></div><strong>{e.score}%</strong></div>}</td><td><button className="row-action" onClick={()=>{setForm(f=>({...f,employee_id:e.id}));setPage("AI Predictions");}} aria-label={`Predict for ${e.name}`}><ArrowUpRight size={17}/></button></td></tr>)}
+              </tbody></table>{employeeListLoading && <div className="empty-state">Loading employees...</div>}{employeeListError && <div className="empty-state">{employeeListError}</div>}{!employeeListLoading && !employeeListError && filtered.length===0 && <div className="empty-state">No matching employees found.</div>}</div>
+              <div className="table-bottom"><span>Showing {filtered.length} live employee records</span><span className="sample-note">Live employee data connected to the API</span></div>
+            </section>
+
+            <footer className="footer"><span>© 2026 WorkForce AI Pro</span><span>Workforce Intelligence Platform <span className="footer-dot">•</span> v1.0.0</span></footer>
+          </>}
+
+          {isHR && page === "Employees" && <Employees /> }
+
+          {isHR && page === "Departments" && <Departments /> }
+
+          {page === "AI Predictions" && <section className="prediction-layout"><article className="panel page-panel"><div className="panel-heading"><div><h2><BrainCircuit size={21} className="inline-icon"/> Attrition prediction</h2><p>Submit employee attributes to the backend ML model.</p></div><span className="model-badge">ML MODEL</span></div><form className="prediction-form" onSubmit={predictAttrition}>{Object.entries(form).map(([key,value])=><label key={key}>{key.replaceAll("_"," ")}{key==="overtime"?<select value={value} onChange={e=>setForm({...form,[key]:e.target.value})}><option>Yes</option><option>No</option></select>:<input type="number" min={key==="job_satisfaction"||key==="work_life_balance"?1:0} max={key==="job_satisfaction"||key==="work_life_balance"?4:undefined} required value={value} onChange={e=>setForm({...form,[key]:e.target.value})}/>}</label>)}<button className="primary-button" disabled={prediction?.loading}>{prediction?.loading?"Predicting...":"Run attrition prediction"} <ArrowUpRight size={17}/></button></form></article><article className="panel prediction-result"><div className="result-icon"><BrainCircuit size={25}/></div><h2>Prediction result</h2><p>Run a prediction to view the response from your API.</p>{prediction?.error&&<div className="error-box">{prediction.error}<p>Check that the backend is running and your login token is valid.</p></div>}{prediction&&!prediction.error&&!prediction.loading&&<div className="result-data"><div className="result-risk">{String(prediction.risk_level??(prediction.predicted_attrition?"High":"Low")).replaceAll("_"," ")}</div><div>Employee ID: {prediction.employee_id}</div>{prediction.predicted_attrition!==undefined&&<div>Predicted attrition: {String(prediction.predicted_attrition)}</div>}{prediction.risk_score!==undefined&&<div>Risk score: {prediction.risk_score}</div>}<pre>{JSON.stringify(prediction,null,2)}</pre></div>}<div className="result-disclaimer">Model outputs support workforce analysis; they should not be used alone to make employment decisions.</div></article></section>}
+
+          {isHR && page === "AI Risk Monitoring" && (
+            <AIRiskMonitoring departments={liveDepartments} />
+          )}
+
+          {page === "Prediction History" && <PredictionHistory />}
+
+          {page === "Attendance" && <Attendance />}
+          {page === "Leave Management" && <LeaveManagement currentUser={currentUser} />}
+
+          {page === "Settings" && <section className="panel page-panel"><div className="panel-heading"><div><h2>Settings</h2><p>Application connection details.</p></div></div><div className="settings-list"><div><strong>Backend API</strong><span>http://127.0.0.1:8000</span></div><div><strong>Frontend origin</strong><span>http://localhost:5173</span></div><div><strong>Authentication</strong><span>JWT bearer token in localStorage</span></div></div><p className="disclaimer">Do not store production secrets in frontend code. Use environment configuration for deployment.</p></section>}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+export default App;

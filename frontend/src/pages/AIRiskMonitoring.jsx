@@ -260,9 +260,11 @@ export default function AIRiskMonitoring({ departments = [] }) {
     setReconcileError("");
 
     try {
-      const response = await api.post("/predictions/monitoring/reconcile", {
-        limit: 500,
-      });
+      const response = await api.post(
+        "/predictions/monitoring/reconcile",
+        null,
+        { params: { limit: 500 } }
+      );
       const result = response.data || {};
       setReconcileMessage(
         `Reconciliation finished: ${Number(result.events_recorded || 0)} event(s) recorded; ${Number(result.failed_count || 0)} failure(s).`
@@ -408,12 +410,13 @@ export default function AIRiskMonitoring({ departments = [] }) {
           <p role="alert" className="p-5 text-sm text-red-600">{errors.employees}</p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[680px] text-left text-sm">
+            <table className="w-full min-w-[850px] text-left text-sm">
               <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                 <tr>
                   <th className="px-5 py-3 font-semibold">Employee</th>
                   <th className="px-5 py-3 font-semibold">Department</th>
                   <th className="px-5 py-3 font-semibold">Risk score</th>
+                  <th className="px-5 py-3 font-semibold">Risk movement</th>
                   <th className="px-5 py-3 font-semibold">Latest prediction</th>
                 </tr>
               </thead>
@@ -437,14 +440,54 @@ export default function AIRiskMonitoring({ departments = [] }) {
                           <div
                             className="h-full rounded-full bg-red-500"
                             style={{
-                              width: `${Math.max(0, Math.min(100, (Number(employee.risk_score) || 0) * 100))}%`,
+                              width: `${Math.max(0, Math.min(100, (Number(employee.risk_score) || 0)))}%`,
                             }}
                           />
                         </div>
                         <span className="font-semibold text-slate-800">
-                          {employee.risk_score == null ? "?" : `${(Number(employee.risk_score) * 100).toFixed(1)}%`}
+                          {employee.risk_score == null ? "?" : `${Number(employee.risk_score).toFixed(1)}%`}
                         </span>
                       </div>
+                    </td>
+                    <td className="px-5 py-4">
+                      {employee.previous_risk_score == null ? (
+                        <div>
+                          <p className="text-sm text-slate-500">No previous assessment</p>
+                          {employee.previous_risk_level && (
+                            <p className="mt-1 text-xs text-slate-400">
+                              Previous level: {employee.previous_risk_level}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <div>
+                          <p className="text-sm text-slate-600">
+                            Previous: {Number(employee.previous_risk_score).toFixed(1)}%
+                          </p>
+                          {employee.previous_risk_level && (
+                            <p className="mt-1 text-xs text-slate-500">
+                              Previous level: {employee.previous_risk_level}
+                            </p>
+                          )}
+                          {employee.risk_score_change_percentage_points != null && (
+                            <p
+                              className={
+                                "mt-1 text-xs font-semibold " +
+                                (Number(employee.risk_score_change_percentage_points) > 0
+                                  ? "text-red-600"
+                                  : Number(employee.risk_score_change_percentage_points) < 0
+                                    ? "text-green-600"
+                                    : "text-slate-500")
+                              }
+                            >
+                              {Number(employee.risk_score_change_percentage_points) > 0
+                                ? "+"
+                                : ""}
+                              {Number(employee.risk_score_change_percentage_points).toFixed(1)} pp
+                            </p>
+                          )}
+                        </div>
+                      )}
                     </td>
                     <td className="px-5 py-4 text-slate-500">
                       {employee.predicted_at
@@ -455,7 +498,7 @@ export default function AIRiskMonitoring({ departments = [] }) {
                 ))}
                 {!loading && highRisk.length === 0 && (
                   <tr>
-                    <td colSpan={4} className="px-5 py-10 text-center text-slate-500">
+                    <td colSpan={5} className="px-5 py-10 text-center text-slate-500">
                       No high-risk employees found for this filter.
                     </td>
                   </tr>
@@ -493,7 +536,8 @@ export default function AIRiskMonitoring({ departments = [] }) {
               <option value="INITIAL_ASSESSMENT">Initial assessment</option>
               <option value="RISK_ESCALATED">Risk escalated</option>
               <option value="RISK_REDUCED">Risk reduced</option>
-              <option value="RISK_CHANGED">Risk changed</option>
+              <option value="RISK_CHANGED">Risk level changed</option>
+              <option value="RISK_SCORE_CHANGED">Risk score changed (10+ points)</option>
               <option value="ASSESSMENT_UNCHANGED">Assessment unchanged</option>
             </select>
             <button
@@ -540,9 +584,12 @@ export default function AIRiskMonitoring({ departments = [] }) {
                       </p>
                     </td>
                     <td className="px-5 py-4 text-slate-600">
-                      {event.previous_risk_level || "—"}
-                      {event.previous_risk_score != null &&
-                        ` (${(Number(event.previous_risk_score) * 100).toFixed(1)}%)`}
+                      <p>{event.previous_risk_level || "N/A"}</p>
+                      {event.previous_risk_score != null && (
+                        <p className="mt-1 text-xs text-slate-500">
+                          {Number(event.previous_risk_score).toFixed(1)}%
+                        </p>
+                      )}
                     </td>
                     <td className="px-5 py-4">
                       <span className={
@@ -557,9 +604,22 @@ export default function AIRiskMonitoring({ departments = [] }) {
                       </span>
                       {event.current_risk_score != null && (
                         <p className="mt-1 text-xs text-slate-500">
-                          {(Number(event.current_risk_score) * 100).toFixed(1)}%
+                          {Number(event.current_risk_score).toFixed(1)}%
                         </p>
                       )}
+                      {event.previous_risk_score != null &&
+                        event.current_risk_score != null && (
+                          <p className={
+                            "mt-1 text-xs font-semibold " +
+                            (Number(event.current_risk_score) > Number(event.previous_risk_score)
+                              ? "text-red-600"
+                              : Number(event.current_risk_score) < Number(event.previous_risk_score)
+                                ? "text-green-600"
+                                : "text-slate-500")
+                          }>
+                            Score change: {Number(event.current_risk_score) > Number(event.previous_risk_score) ? "+" : ""}{(Number(event.current_risk_score) - Number(event.previous_risk_score)).toFixed(1)} pp
+                          </p>
+                        )}
                     </td>
                     <td className="px-5 py-4 text-slate-600">
                       {(event.event_type || "UNKNOWN").replaceAll("_", " ")}

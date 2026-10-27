@@ -1,0 +1,716 @@
+import { useEffect, useMemo, useState } from "react";
+import api from "../api/client";
+
+const RISK_LEVELS = [
+  { key: "Low", color: "#16a34a" },
+  { key: "Medium", color: "#d97706" },
+  { key: "High", color: "#dc2626" },
+];
+
+const PERIODS = [
+  { value: "last_7_days", label: "Last 7 days" },
+  { value: "last_30_days", label: "Last 30 days" },
+  { value: "last_90_days", label: "Last 90 days" },
+];
+
+function errorMessage(error, fallback) {
+  const detail = error?.response?.data?.detail;
+  return typeof detail === "string" ? detail : fallback;
+}
+
+function RiskTrendChart({ rows }) {
+  const width = 900;
+  const height = 270;
+  const left = 48;
+  const right = 18;
+  const top = 22;
+  const bottom = 42;
+  const chartWidth = width - left - right;
+  const chartHeight = height - top - bottom;
+
+  const maxValue = Math.max(
+    1,
+    ...rows.flatMap((row) =>
+      RISK_LEVELS.map((risk) => Number(row[risk.key]) || 0)
+    )
+  );
+
+  const x = (index) =>
+    left + (rows.length <= 1 ? chartWidth / 2 : index * chartWidth / (rows.length - 1));
+
+  const y = (value) => top + chartHeight - (value / maxValue) * chartHeight;
+
+  const labelIndexes = [...new Set([
+    0,
+    Math.floor((rows.length - 1) / 2),
+    rows.length - 1,
+  ])];
+
+  if (!rows.length) {
+    return <p className="py-10 text-center text-sm text-slate-500">No trend data available.</p>;
+  }
+
+  return (
+    <div className="w-full overflow-x-auto">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className="h-auto min-w-[580px] w-full"
+        role="img"
+        aria-label="Saved AI prediction counts by risk level and date"
+      >
+        {[0, 0.25, 0.5, 0.75, 1].map((fraction) => {
+          const yy = top + chartHeight * fraction;
+          const value = Math.round(maxValue * (1 - fraction));
+          return (
+            <g key={fraction}>
+              <line x1={left} y1={yy} x2={width - right} y2={yy} stroke="#e2e8f0" strokeDasharray="4 4" />
+              <text x={left - 10} y={yy + 4} textAnchor="end" fill="#64748b" fontSize="11">{value}</text>
+            </g>
+          );
+        })}
+
+        {RISK_LEVELS.map((risk) => {
+          const points = rows.map((row, index) =>
+            `${x(index)},${y(Number(row[risk.key]) || 0)}`
+          ).join(" ");
+
+          return (
+            <g key={risk.key}>
+              <polyline
+                points={points}
+                fill="none"
+                stroke={risk.color}
+                strokeWidth="2.5"
+                strokeLinejoin="round"
+                strokeLinecap="round"
+              />
+              {rows.map((row, index) => (
+                <circle
+                  key={`${risk.key}-${row.date}`}
+                  cx={x(index)}
+                  cy={y(Number(row[risk.key]) || 0)}
+                  r="3"
+                  fill={risk.color}
+                >
+                  <title>{row.date}: {risk.key} risk ? {row[risk.key]}</title>
+                </circle>
+              ))}
+            </g>
+          );
+        })}
+
+        {labelIndexes.map((index) => (
+          <text
+            key={index}
+            x={x(index)}
+            y={height - 12}
+            textAnchor={index === 0 ? "start" : index === rows.length - 1 ? "end" : "middle"}
+            fill="#64748b"
+            fontSize="11"
+          >
+            {rows[index]?.date || ""}
+          </text>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+export default function AIRiskMonitoring({ departments = [] }) {
+  const [period, setPeriod] = useState("last_30_days");
+  const [departmentId, setDepartmentId] = useState("");
+  const [summary, setSummary] = useState(null);
+  const [highRisk, setHighRisk] = useState([]);
+  const [trends, setTrends] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [errors, setErrors] = useState({});
+  const [riskEvents, setRiskEvents] = useState([]);
+  const [eventPage, setEventPage] = useState(1);
+  const [eventTotal, setEventTotal] = useState(0);
+  const [eventType, setEventType] = useState("");
+  const [eventLoading, setEventLoading] = useState(false);
+  const [eventError, setEventError] = useState("");
+  const [riskNotifications, setRiskNotifications] = useState([]);
+  const [notificationError, setNotificationError] = useState("");
+  const [reconciling, setReconciling] = useState(false);
+  const [reconcileMessage, setReconcileMessage] = useState("");
+  const [reconcileError, setReconcileError] = useState("");
+  const eventPageSize = 10;
+
+  const params = useMemo(() => {
+    const result = {};
+    if (departmentId) result.department_id = Number(departmentId);
+    return result;
+  }, [departmentId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadMonitoring() {
+      setLoading(true);
+      setEventLoading(true);
+      setErrors({});
+
+      const requests = await Promise.allSettled([
+        api.get("/predictions/monitoring/summary", { params }),
+        api.get("/predictions/monitoring/high-risk-employees", {
+          params: { ...params, limit: 100 },
+        }),
+        api.get("/predictions/monitoring/trends", {
+          params: { ...params, period },
+        }),
+        api.get("/predictions/monitoring/events", {
+          params: {
+            ...params,
+            page: eventPage,
+            page_size: eventPageSize,
+            ...(eventType ? { event_type: eventType } : {}),
+          },
+        }),
+        api.get("/notifications/"),
+      ]);
+
+      if (cancelled) return;
+
+      const nextErrors = {};
+
+      if (requests[0].status === "fulfilled") {
+        setSummary(requests[0].value.data);
+      } else {
+        setSummary(null);
+        nextErrors.summary = errorMessage(
+          requests[0].reason,
+          "Unable to load risk summary."
+        );
+      }
+
+      if (requests[1].status === "fulfilled") {
+        setHighRisk(requests[1].value.data.items || []);
+      } else {
+        setHighRisk([]);
+        nextErrors.employees = errorMessage(
+          requests[1].reason,
+          "Unable to load high-risk employees."
+        );
+      }
+
+      if (requests[2].status === "fulfilled") {
+        setTrends(requests[2].value.data.trends || []);
+      } else {
+        setTrends([]);
+        nextErrors.trends = errorMessage(
+          requests[2].reason,
+          "Unable to load prediction trends."
+        );
+      }
+
+      if (requests[3]?.status === "fulfilled") {
+        const eventData = requests[3].value.data;
+        setRiskEvents(Array.isArray(eventData?.items) ? eventData.items : []);
+        setEventTotal(Number(eventData?.total || 0));
+        setEventError("");
+      } else if (requests[3]) {
+        setRiskEvents([]);
+        setEventTotal(0);
+        setEventError(errorMessage(
+          requests[3].reason,
+          "Unable to load risk event history."
+        ));
+      }
+
+      if (requests[4]?.status === "fulfilled") {
+        const notificationData = requests[4].value.data;
+        const notificationItems = Array.isArray(notificationData)
+          ? notificationData
+          : Array.isArray(notificationData?.items)
+            ? notificationData.items
+            : Array.isArray(notificationData?.notifications)
+              ? notificationData.notifications
+              : [];
+        setRiskNotifications(
+          notificationItems.filter((item) =>
+            String(item.category || "").toUpperCase() === "AI_RISK"
+          )
+        );
+        setNotificationError("");
+      } else if (requests[4]) {
+        setRiskNotifications([]);
+        setNotificationError(errorMessage(
+          requests[4].reason,
+          "Unable to load notifications."
+        ));
+      }
+
+      setErrors(nextErrors);
+      setEventLoading(false);
+      setLoading(false);
+    }
+
+    loadMonitoring();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [params, period, refreshKey, eventPage, eventType]);
+
+  async function reconcileMissingEvents() {
+    setReconciling(true);
+    setReconcileMessage("");
+    setReconcileError("");
+
+    try {
+      const response = await api.post("/predictions/monitoring/reconcile", {
+        limit: 500,
+      });
+      const result = response.data || {};
+      setReconcileMessage(
+        `Reconciliation finished: ${Number(result.events_recorded || 0)} event(s) recorded; ${Number(result.failed_count || 0)} failure(s).`
+      );
+      setRefreshKey((value) => value + 1);
+    } catch (error) {
+      setReconcileError(
+        errorMessage(error, "Unable to reconcile missing risk events.")
+      );
+    } finally {
+      setReconciling(false);
+    }
+  }
+
+  const counts = summary?.risk_counts || {};
+  const total = Number(summary?.total_predictions || 0);
+
+  return (
+    <div className="space-y-6">
+      <section className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-widest text-indigo-600">
+            Workforce intelligence
+          </p>
+          <h1 className="mt-1 text-2xl font-bold text-slate-900">AI Risk Monitoring</h1>
+          <p className="mt-2 text-sm text-slate-500">
+            Monitor saved attrition predictions and the latest risk assessment for each employee.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <select
+            value={departmentId}
+            onChange={(event) => setDepartmentId(event.target.value)}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+            aria-label="Filter by department"
+          >
+            <option value="">All departments</option>
+            {departments.map((department) => (
+              <option key={department.id} value={department.id}>
+                {department.name || department.department_name || `Department ${department.id}`}
+              </option>
+            ))}
+          </select>
+
+          <button
+            type="button"
+            onClick={() => setRefreshKey((value) => value + 1)}
+            className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700"
+          >
+            Refresh
+          </button>
+        </div>
+      </section>
+
+      {loading && (
+        <p className="text-sm text-slate-500" role="status">Loading AI risk monitoring data...</p>
+      )}
+
+      <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <article className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-sm text-slate-500">Saved predictions</p>
+          <p className="mt-3 text-3xl font-bold text-slate-900">
+            {summary ? total.toLocaleString() : "?"}
+          </p>
+          <p className="mt-2 text-xs text-slate-500">Prediction records, not unique employees</p>
+        </article>
+
+        {RISK_LEVELS.map((risk) => (
+          <article key={risk.key} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex items-center gap-2">
+              <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: risk.color }} />
+              <p className="text-sm text-slate-500">{risk.key} risk</p>
+            </div>
+            <p className="mt-3 text-3xl font-bold text-slate-900">
+              {summary ? Number(counts[risk.key] || 0).toLocaleString() : "?"}
+            </p>
+            <p className="mt-2 text-xs text-slate-500">
+              {total ? `${((Number(counts[risk.key] || 0) / total) * 100).toFixed(1)}% of saved predictions` : "Share of saved predictions"}
+            </p>
+          </article>
+        ))}
+      </section>
+
+      {errors.summary && (
+        <div role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          Risk summary: {errors.summary}
+        </div>
+      )}
+
+      <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+        <div className="mb-5 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">Prediction risk trends</h2>
+            <p className="mt-1 text-sm text-slate-500">Daily count of saved predictions by risk level</p>
+          </div>
+          <select
+            value={period}
+            onChange={(event) => setPeriod(event.target.value)}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+            aria-label="Prediction trend period"
+          >
+            {PERIODS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </div>
+
+        {errors.trends ? (
+          <p role="alert" className="py-8 text-sm text-red-600">{errors.trends}</p>
+        ) : (
+          <RiskTrendChart rows={trends} />
+        )}
+
+        <div className="mt-4 flex flex-wrap gap-5 border-t border-slate-100 pt-4">
+          {RISK_LEVELS.map((risk) => (
+            <span key={risk.key} className="flex items-center gap-2 text-sm text-slate-600">
+              <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: risk.color }} />
+              {risk.key} risk
+            </span>
+          ))}
+        </div>
+
+        <p className="mt-4 text-xs leading-5 text-slate-500">
+          Trends show when predictions were created. They do not represent confirmed employee departures.
+        </p>
+      </section>
+
+      <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex flex-col justify-between gap-2 border-b border-slate-100 p-5 sm:flex-row sm:items-center">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">High-risk employees</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Employees whose latest saved prediction is classified as High risk
+            </p>
+          </div>
+          <span className="rounded-full bg-red-50 px-3 py-1 text-sm font-semibold text-red-700">
+            {highRisk.length} shown
+          </span>
+        </div>
+
+        {errors.employees ? (
+          <p role="alert" className="p-5 text-sm text-red-600">{errors.employees}</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[850px] text-left text-sm">
+              <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-5 py-3 font-semibold">Employee</th>
+                  <th className="px-5 py-3 font-semibold">Department</th>
+                  <th className="px-5 py-3 font-semibold">Risk score</th>
+                  <th className="px-5 py-3 font-semibold">Risk movement</th>
+                  <th className="px-5 py-3 font-semibold">Latest prediction</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {highRisk.map((employee) => (
+                  <tr key={employee.employee_id} className="hover:bg-slate-50">
+                    <td className="px-5 py-4">
+                      <p className="font-semibold text-slate-900">
+                        {employee.employee_name || "Unnamed employee"}
+                      </p>
+                      <p className="mt-1 text-xs text-slate-500">
+                        {employee.employee_code || `Employee ID ${employee.employee_id}`}
+                      </p>
+                    </td>
+                    <td className="px-5 py-4 text-slate-600">
+                      {employee.department_name || "Unassigned"}
+                    </td>
+                    <td className="px-5 py-4">
+                      <div className="flex items-center gap-3">
+                        <div className="h-2 w-24 overflow-hidden rounded-full bg-slate-100">
+                          <div
+                            className="h-full rounded-full bg-red-500"
+                            style={{
+                              width: `${Math.max(0, Math.min(100, (Number(employee.risk_score) || 0) * 100))}%`,
+                            }}
+                          />
+                        </div>
+                        <span className="font-semibold text-slate-800">
+                          {employee.risk_score == null ? "?" : `${(Number(employee.risk_score) * 100).toFixed(1)}%`}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-5 py-4">
+                      {employee.previous_risk_score == null ? (
+                        <div>
+                          <p className="text-sm text-slate-500">No previous assessment</p>
+                          {employee.previous_risk_level && (
+                            <p className="mt-1 text-xs text-slate-400">
+                              Previous level: {employee.previous_risk_level}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <div>
+                          <p className="text-sm text-slate-600">
+                            Previous: {(Number(employee.previous_risk_score) * 100).toFixed(1)}%
+                          </p>
+                          {employee.previous_risk_level && (
+                            <p className="mt-1 text-xs text-slate-500">
+                              Previous level: {employee.previous_risk_level}
+                            </p>
+                          )}
+                          {employee.risk_score_change_percentage_points != null && (
+                            <p
+                              className={
+                                "mt-1 text-xs font-semibold " +
+                                (Number(employee.risk_score_change_percentage_points) > 0
+                                  ? "text-red-600"
+                                  : Number(employee.risk_score_change_percentage_points) < 0
+                                    ? "text-green-600"
+                                    : "text-slate-500")
+                              }
+                            >
+                              {Number(employee.risk_score_change_percentage_points) > 0
+                                ? "+"
+                                : ""}
+                              {Number(employee.risk_score_change_percentage_points).toFixed(1)} pp
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-5 py-4 text-slate-500">
+                      {employee.predicted_at
+                        ? new Date(employee.predicted_at).toLocaleString()
+                        : "?"}
+                    </td>
+                  </tr>
+                ))}
+                {!loading && highRisk.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="px-5 py-10 text-center text-slate-500">
+                      No high-risk employees found for this filter.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="border-t border-slate-100 px-5 py-3 text-xs text-slate-500">
+          Results are limited to the 100 highest-risk employees returned by the API.
+          Predictions support HR review and should not be used alone to make employment decisions.
+        </div>
+      </section>
+
+      <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex flex-col justify-between gap-3 border-b border-slate-100 p-5 sm:flex-row sm:items-center">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">Risk event history</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Audit trail of recorded employee risk assessments and changes.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <select
+              value={eventType}
+              onChange={(event) => {
+                setEventType(event.target.value);
+                setEventPage(1);
+              }}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+              aria-label="Filter risk events by type"
+            >
+              <option value="">All event types</option>
+              <option value="INITIAL_ASSESSMENT">Initial assessment</option>
+              <option value="RISK_ESCALATED">Risk escalated</option>
+              <option value="RISK_REDUCED">Risk reduced</option>
+              <option value="RISK_CHANGED">Risk level changed</option>
+              <option value="RISK_SCORE_CHANGED">Risk score changed (10+ points)</option>
+              <option value="ASSESSMENT_UNCHANGED">Assessment unchanged</option>
+            </select>
+            <button
+              type="button"
+              onClick={() => setRefreshKey((value) => value + 1)}
+              className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            >
+              Refresh history
+            </button>
+            <button
+              type="button"
+              onClick={reconcileMissingEvents}
+              disabled={reconciling}
+              className="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {reconciling ? "Reconciling…" : "Reconcile missing events"}
+            </button>
+          </div>
+        </div>
+
+        {eventError ? (
+          <p role="alert" className="p-5 text-sm text-red-600">{eventError}</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[850px] text-left text-sm">
+              <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-5 py-3 font-semibold">Employee</th>
+                  <th className="px-5 py-3 font-semibold">Previous risk</th>
+                  <th className="px-5 py-3 font-semibold">Current risk</th>
+                  <th className="px-5 py-3 font-semibold">Event</th>
+                  <th className="px-5 py-3 font-semibold">Recorded</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {riskEvents.map((event) => (
+                  <tr key={event.id} className="hover:bg-slate-50">
+                    <td className="px-5 py-4">
+                      <p className="font-semibold text-slate-900">
+                        {event.employee_name || event.full_name || `Employee ${event.employee_id}`}
+                      </p>
+                      <p className="mt-1 text-xs text-slate-500">
+                        ID {event.employee_id}
+                      </p>
+                    </td>
+                    <td className="px-5 py-4 text-slate-600">
+                      <p>{event.previous_risk_level || "N/A"}</p>
+                      {event.previous_risk_score != null && (
+                        <p className="mt-1 text-xs text-slate-500">
+                          {(Number(event.previous_risk_score) * 100).toFixed(1)}%
+                        </p>
+                      )}
+                    </td>
+                    <td className="px-5 py-4">
+                      <span className={
+                        "inline-flex rounded-full px-2.5 py-1 text-xs font-semibold " +
+                        (event.current_risk_level === "High"
+                          ? "bg-red-50 text-red-700"
+                          : event.current_risk_level === "Medium"
+                            ? "bg-amber-50 text-amber-700"
+                            : "bg-green-50 text-green-700")
+                      }>
+                        {event.current_risk_level || "Unknown"}
+                      </span>
+                      {event.current_risk_score != null && (
+                        <p className="mt-1 text-xs text-slate-500">
+                          {(Number(event.current_risk_score) * 100).toFixed(1)}%
+                        </p>
+                      )}
+                      {event.previous_risk_score != null &&
+                        event.current_risk_score != null && (
+                          <p className={
+                            "mt-1 text-xs font-semibold " +
+                            (Number(event.current_risk_score) > Number(event.previous_risk_score)
+                              ? "text-red-600"
+                              : Number(event.current_risk_score) < Number(event.previous_risk_score)
+                                ? "text-green-600"
+                                : "text-slate-500")
+                          }>
+                            Score change: {Number(event.current_risk_score) > Number(event.previous_risk_score) ? "+" : ""}{((Number(event.current_risk_score) - Number(event.previous_risk_score)) * 100).toFixed(1)} pp
+                          </p>
+                        )}
+                    </td>
+                    <td className="px-5 py-4 text-slate-600">
+                      {(event.event_type || "UNKNOWN").replaceAll("_", " ")}
+                    </td>
+                    <td className="px-5 py-4 text-slate-500">
+                      {event.created_at
+                        ? new Date(event.created_at).toLocaleString()
+                        : "—"}
+                    </td>
+                  </tr>
+                ))}
+                {!eventLoading && riskEvents.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="px-5 py-10 text-center text-slate-500">
+                      No risk events match the selected filters.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="flex flex-col justify-between gap-3 border-t border-slate-100 px-5 py-3 sm:flex-row sm:items-center">
+          <p className="text-xs text-slate-500">
+            {eventLoading ? "Loading events…" : `${eventTotal} event(s) found`}
+          </p>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              disabled={eventPage <= 1 || eventLoading}
+              onClick={() => setEventPage((page) => Math.max(1, page - 1))}
+              className="rounded-lg border border-slate-200 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Previous
+            </button>
+            <span className="text-sm text-slate-600">
+              Page {eventPage} of {Math.max(1, Math.ceil(eventTotal / eventPageSize))}
+            </span>
+            <button
+              type="button"
+              disabled={eventPage >= Math.max(1, Math.ceil(eventTotal / eventPageSize)) || eventLoading}
+              onClick={() => setEventPage((page) => page + 1)}
+              className="rounded-lg border border-slate-200 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-100 p-5">
+          <h2 className="text-lg font-semibold text-slate-900">AI risk notifications</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            High-risk alerts delivered through the existing notification system.
+          </p>
+        </div>
+
+        {notificationError ? (
+          <p role="alert" className="p-5 text-sm text-amber-700">
+            {notificationError}
+          </p>
+        ) : riskNotifications.length === 0 ? (
+          <p className="p-5 text-sm text-slate-500">
+            No AI risk notifications are available.
+          </p>
+        ) : (
+          <ul className="divide-y divide-slate-100">
+            {riskNotifications.slice(0, 10).map((notification) => (
+              <li key={notification.id} className="flex gap-3 p-5">
+                <span className="mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-red-50 text-red-600" aria-hidden="true">
+                  !
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="font-semibold text-slate-900">
+                    {notification.title || "AI risk alert"}
+                  </p>
+                  <p className="mt-1 text-sm text-slate-600">
+                    {notification.message || "Review the employee risk assessment."}
+                  </p>
+                  <p className="mt-2 text-xs text-slate-400">
+                    {notification.created_at
+                      ? new Date(notification.created_at).toLocaleString()
+                      : ""}
+                    {notification.is_read === false ? " · Unread" : ""}
+                  </p>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}

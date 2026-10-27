@@ -1,7 +1,8 @@
-from fastapi import FastAPI
+﻿from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.prediction_history import router as prediction_history_router
 from app.api.v1.predictions import router as predictions_router
+from app.api.v1.datasets import router as datasets_router
 from app.api.v1.risk_monitoring import router as risk_monitoring_router
 
 from app.api.v1.auth import router as auth_router
@@ -45,6 +46,7 @@ app.include_router(attendance_router, prefix="/api/v1")
 app.include_router(leaves_router, prefix='/api/v1')
 app.include_router(leave_balances_router, prefix="/api/v1")
 app.include_router(predictions_router, prefix="/api/v1")
+app.include_router(datasets_router, prefix="/api/v1")
 app.include_router(risk_monitoring_router, prefix="/api/v1")
 app.include_router(prediction_history_router, prefix="/api/v1")
 app.include_router(payroll_router, prefix="/api/v1")
@@ -56,4 +58,5 @@ app.include_router(documents_router, prefix="/api/v1")
 @app.get("/health", tags=["Health"])
 def health_check():
     return {"status": "healthy", "service": "WorkForce AI Pro"}
+
 
