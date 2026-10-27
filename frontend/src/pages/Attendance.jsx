@@ -8,6 +8,11 @@ import {
   checkIn,
   checkOut,
   getDailyAttendanceSummary,
+  getShifts,
+  createShift,
+  updateShift,
+  deleteShift,
+  getAttendanceReport,
 } from "../api/attendance";
 
 const today = () => {
@@ -17,6 +22,7 @@ const today = () => {
 
 const emptyForm = {
   employee_id: "",
+  shift_id: "",
   attendance_date: today(),
   check_in: "",
   check_out: "",
@@ -26,6 +32,18 @@ const emptyForm = {
 
 function toLocalInput(value) {
   if (!value) return "";
+
+  // Preserve naive timestamps returned by the backend as local wall-clock times.
+  if (typeof value === "string") {
+    const match = value.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
+    const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+
+    if (match && !hasTimezone) {
+      return `${match[1]}T${match[2]}`;
+    }
+  }
+
+  // Convert timezone-aware timestamps to local time for datetime-local inputs.
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
@@ -40,6 +58,20 @@ function errorMessage(error, fallback) {
 }
 
 export default function Attendance() {
+  const [currentUser] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("user") || "null");
+    } catch {
+      return null;
+    }
+  });
+  const currentRole = String(currentUser?.role || "").toUpperCase();
+  const isHR = ["ADMIN", "HR"].includes(currentRole);
+  const isEmployee = currentRole === "EMPLOYEE";
+  const ownEmployeeId = currentUser?.employee_id
+    ? Number(currentUser.employee_id)
+    : null;
+
   const [records, setRecords] = useState([]);
   const [employees, setEmployees] = useState([]);
   const [summary, setSummary] = useState(null);
@@ -52,6 +84,20 @@ export default function Attendance() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [shifts, setShifts] = useState([]);
+  const [shiftForm, setShiftForm] = useState({
+    name: "",
+    start_time: "09:00",
+    end_time: "17:00",
+    break_minutes: 60,
+  });
+  const [editingShiftId, setEditingShiftId] = useState(null);
+  const [savingShift, setSavingShift] = useState(false);
+  const [reportStartDate, setReportStartDate] = useState(today());
+  const [reportEndDate, setReportEndDate] = useState(today());
+  const [attendanceReport, setAttendanceReport] = useState(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportError, setReportError] = useState("");
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -61,22 +107,56 @@ export default function Attendance() {
       const params = { page: 1, page_size: 100 };
       if (filterDate) params.attendance_date = filterDate;
       if (filterStatus) params.status = filterStatus;
-      if (filterEmployee) params.employee_id = Number(filterEmployee);
 
-      const [attendanceResponse, employeeResponse, summaryResponse] =
-        await Promise.all([
+      if (isHR) {
+        if (filterEmployee) params.employee_id = Number(filterEmployee);
+
+        const [
+          attendanceResponse,
+          employeeResponse,
+          summaryResponse,
+          shiftResponse,
+        ] = await Promise.all([
           getAttendance(params),
           getEmployees({ page: 1, page_size: 100 }),
           getDailyAttendanceSummary(filterDate || today()),
+          getShifts(),
         ]);
 
-      setRecords(Array.isArray(attendanceResponse.data) ? attendanceResponse.data : []);
-      setEmployees(
-        Array.isArray(employeeResponse.data)
-          ? employeeResponse.data
-          : employeeResponse.data?.items || employeeResponse.data?.results || []
-      );
-      setSummary(summaryResponse.data);
+        const employeeData = employeeResponse.data;
+        setRecords(
+          Array.isArray(attendanceResponse.data)
+            ? attendanceResponse.data
+            : []
+        );
+        setEmployees(
+          Array.isArray(employeeData)
+            ? employeeData
+            : employeeData?.items || employeeData?.results || []
+        );
+        setSummary(summaryResponse.data);
+        setShifts(
+          Array.isArray(shiftResponse.data) ? shiftResponse.data : []
+        );
+      } else if (isEmployee && ownEmployeeId) {
+        const [attendanceResponse, summaryResponse] = await Promise.all([
+          getAttendance({ ...params, employee_id: ownEmployeeId }),
+          getDailyAttendanceSummary(filterDate || today()),
+        ]);
+
+        setRecords(
+          Array.isArray(attendanceResponse.data)
+            ? attendanceResponse.data
+            : []
+        );
+        setEmployees([]);
+        setShifts([]);
+        setSummary(summaryResponse.data);
+      } else {
+        throw new Error(
+          "Attendance requires an Admin/HR account or a linked employee account."
+        );
+      }
     } catch (err) {
       setError(errorMessage(
         err,
@@ -85,7 +165,7 @@ export default function Attendance() {
     } finally {
       setLoading(false);
     }
-  }, [filterDate, filterStatus, filterEmployee]);
+  }, [filterDate, filterStatus, filterEmployee, isHR, isEmployee, ownEmployeeId]);
 
   useEffect(() => {
     loadData();
@@ -106,9 +186,11 @@ export default function Attendance() {
 
     const payload = {
       employee_id: Number(form.employee_id),
+      shift_id: form.shift_id ? Number(form.shift_id) : null,
       attendance_date: form.attendance_date,
-      check_in: form.check_in ? new Date(form.check_in).toISOString() : null,
-      check_out: form.check_out ? new Date(form.check_out).toISOString() : null,
+      // Preserve local wall-clock time for the backend's naive DateTime columns.
+      check_in: form.check_in ? form.check_in.replace("T", " ") : null,
+      check_out: form.check_out ? form.check_out.replace("T", " ") : null,
       status: form.status,
       remarks: form.remarks.trim() || null,
     };
@@ -137,6 +219,7 @@ export default function Attendance() {
     setEditingId(record.id);
     setForm({
       employee_id: String(record.employee_id),
+      shift_id: record.shift_id == null ? "" : String(record.shift_id),
       attendance_date: record.attendance_date,
       check_in: toLocalInput(record.check_in),
       check_out: toLocalInput(record.check_out),
@@ -178,6 +261,95 @@ export default function Attendance() {
     }
   }
 
+  async function handleShiftSubmit(event) {
+    event.preventDefault();
+    setError("");
+    setNotice("");
+    setSavingShift(true);
+
+    const payload = {
+      name: shiftForm.name.trim(),
+      start_time: shiftForm.start_time,
+      end_time: shiftForm.end_time,
+      break_minutes: Number(shiftForm.break_minutes),
+    };
+
+    try {
+      if (editingShiftId !== null) {
+        await updateShift(editingShiftId, payload);
+        setNotice("Shift updated successfully.");
+      } else {
+        await createShift(payload);
+        setNotice("Shift created successfully.");
+      }
+
+      setShiftForm({
+        name: "",
+        start_time: "09:00",
+        end_time: "17:00",
+        break_minutes: 60,
+      });
+      setEditingShiftId(null);
+      await loadData();
+    } catch (err) {
+      setError(errorMessage(err, "Unable to save shift."));
+    } finally {
+      setSavingShift(false);
+    }
+  }
+
+  async function handleDeleteShift(shift) {
+    if (!window.confirm(`Delete shift "${shift.name}"?`)) return;
+
+    setError("");
+    setNotice("");
+
+    try {
+      await deleteShift(shift.id);
+      setNotice("Shift deleted successfully.");
+      if (editingShiftId === shift.id) {
+        setEditingShiftId(null);
+        setShiftForm({
+          name: "",
+          start_time: "09:00",
+          end_time: "17:00",
+          break_minutes: 60,
+        });
+      }
+      await loadData();
+    } catch (err) {
+      setError(errorMessage(
+        err,
+        "Unable to delete shift. It may be assigned to attendance records."
+      ));
+    }
+  }
+
+  async function loadReport(event) {
+    event?.preventDefault();
+    setReportError("");
+    setReportLoading(true);
+
+    try {
+      const response = await getAttendanceReport({
+        start_date: reportStartDate,
+        end_date: reportEndDate,
+      });
+      setAttendanceReport(response.data);
+    } catch (err) {
+      setReportError(errorMessage(err, "Unable to load attendance report."));
+      setAttendanceReport(null);
+    } finally {
+      setReportLoading(false);
+    }
+  }
+
+  function formatMinutes(minutes) {
+    if (minutes == null) return "?";
+    const value = Number(minutes);
+    return `${Math.floor(value / 60)}h ${value % 60}m`;
+  }
+
   const summaryCards = [
     { label: "Total records", value: summary?.total_records ?? "—" },
     { label: "Present", value: summary?.counts?.Present ?? 0 },
@@ -211,6 +383,39 @@ export default function Attendance() {
         </div>
       )}
 
+      {isEmployee && (
+        <section className="rounded-xl border border-slate-200 bg-white p-5">
+          <h2 className="text-lg font-semibold text-slate-900">My attendance</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Record attendance for your linked employee account.
+          </p>
+          {!ownEmployeeId ? (
+            <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              Your login is not linked to an employee record. Please contact HR.
+            </p>
+          ) : (
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => handlePunch(ownEmployeeId, "in")}
+                className="rounded-lg bg-emerald-600 px-5 py-2.5 font-medium text-white disabled:opacity-50"
+              >
+                Check in now
+              </button>
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => handlePunch(ownEmployeeId, "out")}
+                className="rounded-lg bg-indigo-600 px-5 py-2.5 font-medium text-white disabled:opacity-50"
+              >
+                Check out now
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
         {summaryCards.map((item) => (
           <article key={item.label} className="rounded-xl border bg-white p-4">
@@ -220,7 +425,7 @@ export default function Attendance() {
         ))}
       </div>
 
-      <form onSubmit={handleSubmit} className="grid gap-4 rounded-xl border bg-white p-5 md:grid-cols-2 xl:grid-cols-3">
+{isHR && (\n      <form onSubmit={handleSubmit} className="grid gap-4 rounded-xl border bg-white p-5 md:grid-cols-2 xl:grid-cols-3">
         <h2 className="text-lg font-semibold md:col-span-2 xl:col-span-3">
           {editingId !== null ? "Edit attendance" : "Add attendance"}
         </h2>
@@ -248,6 +453,23 @@ export default function Attendance() {
           Attendance date
           <input type="date" name="attendance_date" required value={form.attendance_date}
             onChange={changeForm} className="rounded-lg border p-3" />
+        </label>
+
+        <label className="grid gap-1 text-sm font-medium text-slate-700">
+          Assigned shift
+          <select
+            name="shift_id"
+            value={form.shift_id}
+            onChange={changeForm}
+            className="rounded-lg border bg-white p-3"
+          >
+            <option value="">No shift assigned</option>
+            {shifts.map((shift) => (
+              <option key={shift.id} value={shift.id}>
+                {shift.name} ({String(shift.start_time).slice(0, 5)}?{String(shift.end_time).slice(0, 5)})
+              </option>
+            ))}
+          </select>
         </label>
 
         <label className="grid gap-1 text-sm font-medium text-slate-700">
@@ -293,9 +515,267 @@ export default function Attendance() {
             </button>
           )}
         </div>
-      </form>
+      </form>\n      )}
 
-      <div className="grid gap-3 rounded-xl border bg-white p-4 md:grid-cols-3">
+
+{isHR && (\n      <section className="grid gap-5 rounded-xl border border-slate-200 bg-white p-5 xl:grid-cols-2">
+        <div className="xl:col-span-2">
+          <h2 className="text-lg font-semibold text-slate-900">Shift management</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Create and maintain shifts used for working-hours and overtime calculations.
+          </p>
+        </div>
+
+        <form onSubmit={handleShiftSubmit} className="grid content-start gap-3 sm:grid-cols-2">
+          <h3 className="font-medium sm:col-span-2">
+            {editingShiftId !== null ? "Edit shift" : "Create shift"}
+          </h3>
+
+          <label className="grid gap-1 text-sm text-slate-600 sm:col-span-2">
+            Shift name
+            <input
+              required
+              maxLength={100}
+              value={shiftForm.name}
+              onChange={(event) =>
+                setShiftForm({ ...shiftForm, name: event.target.value })
+              }
+              placeholder="e.g. General Shift"
+              className="rounded-lg border p-3"
+            />
+          </label>
+
+          <label className="grid gap-1 text-sm text-slate-600">
+            Start time
+            <input
+              type="time"
+              required
+              value={shiftForm.start_time}
+              onChange={(event) =>
+                setShiftForm({ ...shiftForm, start_time: event.target.value })
+              }
+              className="rounded-lg border p-3"
+            />
+          </label>
+
+          <label className="grid gap-1 text-sm text-slate-600">
+            End time
+            <input
+              type="time"
+              required
+              value={shiftForm.end_time}
+              onChange={(event) =>
+                setShiftForm({ ...shiftForm, end_time: event.target.value })
+              }
+              className="rounded-lg border p-3"
+            />
+          </label>
+
+          <label className="grid gap-1 text-sm text-slate-600 sm:col-span-2">
+            Unpaid break (minutes)
+            <input
+              type="number"
+              min="0"
+              max="720"
+              required
+              value={shiftForm.break_minutes}
+              onChange={(event) =>
+                setShiftForm({ ...shiftForm, break_minutes: event.target.value })
+              }
+              className="rounded-lg border p-3"
+            />
+          </label>
+
+          <div className="flex flex-wrap gap-2 sm:col-span-2">
+            <button
+              type="submit"
+              disabled={savingShift}
+              className="rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {savingShift
+                ? "Saving..."
+                : editingShiftId !== null
+                  ? "Save shift"
+                  : "Create shift"}
+            </button>
+
+            {editingShiftId !== null && (
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingShiftId(null);
+                  setShiftForm({
+                    name: "",
+                    start_time: "09:00",
+                    end_time: "17:00",
+                    break_minutes: 60,
+                  });
+                }}
+                className="rounded-lg border px-4 py-2.5 text-sm"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+        </form>
+
+        <div className="overflow-x-auto">
+          <h3 className="mb-2 font-medium">Existing shifts</h3>
+          <table className="w-full text-left text-sm">
+            <thead className="bg-slate-50 text-slate-600">
+              <tr>
+                <th className="px-3 py-2">Shift</th>
+                <th className="px-3 py-2">Hours</th>
+                <th className="px-3 py-2">Break</th>
+                <th className="px-3 py-2">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {shifts.length === 0 ? (
+                <tr>
+                  <td colSpan="4" className="p-5 text-center text-slate-500">
+                    No shifts configured yet.
+                  </td>
+                </tr>
+              ) : shifts.map((shift) => (
+                <tr key={shift.id}>
+                  <td className="px-3 py-3 font-medium">{shift.name}</td>
+                  <td className="whitespace-nowrap px-3 py-3">
+                    {String(shift.start_time).slice(0, 5)}?{String(shift.end_time).slice(0, 5)}
+                  </td>
+                  <td className="px-3 py-3">{shift.break_minutes}m</td>
+                  <td className="whitespace-nowrap px-3 py-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingShiftId(shift.id);
+                        setShiftForm({
+                          name: shift.name,
+                          start_time: String(shift.start_time).slice(0, 5),
+                          end_time: String(shift.end_time).slice(0, 5),
+                          break_minutes: shift.break_minutes,
+                        });
+                      }}
+                      className="mr-3 font-medium text-indigo-600"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteShift(shift)}
+                      className="font-medium text-red-600"
+                    >
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      )}\n\n{isHR && (\n      <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5">
+        <div>
+          <h2 className="text-lg font-semibold text-slate-900">Attendance reports</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Review attendance counts, recorded working time, and assigned-shift overtime.
+          </p>
+        </div>
+
+        <form onSubmit={loadReport} className="grid gap-3 sm:grid-cols-3">
+          <label className="grid gap-1 text-sm text-slate-600">
+            Start date
+            <input
+              type="date"
+              required
+              value={reportStartDate}
+              max={reportEndDate}
+              onChange={(event) => setReportStartDate(event.target.value)}
+              className="rounded-lg border p-3"
+            />
+          </label>
+          <label className="grid gap-1 text-sm text-slate-600">
+            End date
+            <input
+              type="date"
+              required
+              value={reportEndDate}
+              min={reportStartDate}
+              onChange={(event) => setReportEndDate(event.target.value)}
+              className="rounded-lg border p-3"
+            />
+          </label>
+          <div className="flex items-end">
+            <button
+              type="submit"
+              disabled={reportLoading}
+              className="w-full rounded-lg bg-indigo-600 px-4 py-3 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {reportLoading ? "Loading report..." : "Generate report"}
+            </button>
+          </div>
+        </form>
+
+        {reportError && (
+          <div role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            {reportError}
+          </div>
+        )}
+
+        {attendanceReport && (
+          <>
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              {[
+                ["Total records", attendanceReport.total_records ?? 0],
+                ["Present", attendanceReport.counts?.Present ?? 0],
+                ["Absent", attendanceReport.counts?.Absent ?? 0],
+                ["Late", attendanceReport.counts?.Late ?? 0],
+                ["Worked", formatMinutes(attendanceReport.total_worked_minutes)],
+                ["Overtime", formatMinutes(attendanceReport.total_overtime_minutes)],
+              ].map(([label, value]) => (
+                <article key={label} className="rounded-lg bg-slate-50 p-3">
+                  <p className="text-xs text-slate-500">{label}</p>
+                  <p className="mt-1 text-lg font-semibold text-slate-900">{value}</p>
+                </article>
+              ))}
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-slate-50 text-slate-600">
+                  <tr>
+                    <th className="px-3 py-2">Date</th>
+                    <th className="px-3 py-2">Records</th>
+                    <th className="px-3 py-2">Present</th>
+                    <th className="px-3 py-2">Absent</th>
+                    <th className="px-3 py-2">Worked</th>
+                    <th className="px-3 py-2">Overtime</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {(attendanceReport.daily_summary || []).map((day) => (
+                    <tr key={day.date}>
+                      <td className="whitespace-nowrap px-3 py-2">{day.date}</td>
+                      <td className="px-3 py-2">{day.total_records}</td>
+                      <td className="px-3 py-2">{day.counts?.Present ?? 0}</td>
+                      <td className="px-3 py-2">{day.counts?.Absent ?? 0}</td>
+                      <td className="px-3 py-2">
+                        {day.worked_records ? formatMinutes(day.worked_minutes) : "?"}
+                      </td>
+                      <td className="px-3 py-2">
+                        {day.overtime_records ? formatMinutes(day.overtime_minutes) : "?"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </section>
+
+      )}\n\n      <div className="grid gap-3 rounded-xl border bg-white p-4 md:grid-cols-3">
         <label className="grid gap-1 text-sm text-slate-600">
           Filter by date
           <input type="date" value={filterDate}
@@ -313,6 +793,7 @@ export default function Attendance() {
             <option>On Leave</option>
           </select>
         </label>
+        {isHR && (
         <label className="grid gap-1 text-sm text-slate-600">
           Filter by employee
           <select value={filterEmployee} onChange={(e) => setFilterEmployee(e.target.value)}
@@ -325,22 +806,23 @@ export default function Attendance() {
             ))}
           </select>
         </label>
+        )}
       </div>
 
       <div className="overflow-x-auto rounded-xl border bg-white">
         <table className="w-full text-left text-sm">
           <thead className="bg-slate-50 text-slate-600">
             <tr>
-              {["ID", "Employee", "Date", "Check-in", "Check-out", "Status", "Actions"].map((heading) => (
+              {["ID", "Employee", "Date", "Check-in", "Check-out", "Status", "Shift", "Worked", "Overtime", "Actions"].map((heading) => (
                 <th key={heading} className="whitespace-nowrap px-4 py-3 font-semibold">{heading}</th>
               ))}
             </tr>
           </thead>
           <tbody className="divide-y">
             {loading ? (
-              <tr><td colSpan="7" className="p-8 text-center">Loading attendance...</td></tr>
+              <tr><td colSpan="10" className="p-8 text-center">Loading attendance...</td></tr>
             ) : records.length === 0 ? (
-              <tr><td colSpan="7" className="p-8 text-center text-slate-500">No attendance records for these filters.</td></tr>
+              <tr><td colSpan="10" className="p-8 text-center text-slate-500">No attendance records for these filters.</td></tr>
             ) : records.map((record) => {
               const employee = employees.find((item) => Number(item.id) === Number(record.employee_id));
               return (
@@ -361,8 +843,21 @@ export default function Attendance() {
                     <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium">{record.status}</span>
                   </td>
                   <td className="whitespace-nowrap px-4 py-3">
-                    <button onClick={() => startEdit(record)} className="mr-3 font-medium text-indigo-600">Edit</button>
-                    <button onClick={() => handleDelete(record)} className="font-medium text-red-600">Delete</button>
+                    {record.shift_name || "?"}
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3">
+                    {formatMinutes(record.worked_minutes)}
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3">
+                    {formatMinutes(record.overtime_minutes)}
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3">
+                    {isHR && (
+                      <>
+                        <button onClick={() => startEdit(record)} className="mr-3 font-medium text-indigo-600">Edit</button>
+                        <button onClick={() => handleDelete(record)} className="font-medium text-red-600">Delete</button>
+                      </>
+                    )}
                     <div className="mt-2 flex flex-wrap items-center gap-2">
                       {!record.check_in && (
                         <button

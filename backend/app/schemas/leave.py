@@ -8,7 +8,7 @@ LeaveStatus = Literal["Pending", "Approved", "Rejected"]
 
 
 class LeaveRequestCreate(BaseModel):
-    employee_id: int = Field(gt=0)
+    employee_id: int | None = Field(default=None, gt=0)
     leave_type: LeaveType
     start_date: date
     end_date: date

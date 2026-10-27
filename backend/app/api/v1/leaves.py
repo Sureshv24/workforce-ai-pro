@@ -22,7 +22,7 @@ def require_hr(user: User):
 
 def current_employee(db: Session, user: User) -> Employee:
     employee = db.scalar(
-        select(Employee).where(Employee.employee_code == user.email)
+        select(Employee).where(Employee.id == user.employee_id)
     )
     if employee is None:
         raise HTTPException(
@@ -44,7 +44,7 @@ def create_leave_request(
             raise HTTPException(status_code=404, detail="Employee not found")
     else:
         employee = current_employee(db, user)
-        if employee.id != payload.employee_id:
+        if payload.employee_id is not None and employee.id != payload.employee_id:
             raise HTTPException(status_code=403, detail="You can only request leave for yourself")
 
     if payload.start_date < date.today():
@@ -64,7 +64,7 @@ def create_leave_request(
             detail="This request overlaps an existing pending or approved leave.",
         )
 
-    record = LeaveRequest(**payload.model_dump())
+    record = LeaveRequest(**payload.model_dump(exclude={"employee_id"}))
     record.employee_id = employee.id
     db.add(record)
     db.commit()

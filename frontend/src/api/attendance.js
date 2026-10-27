@@ -29,3 +29,24 @@ export function getDailyAttendanceSummary(attendance_date) {
     params: { attendance_date },
   });
 }
+
+
+export function getShifts() {
+  return api.get("/attendance/shifts");
+}
+
+export function createShift(payload) {
+  return api.post("/attendance/shifts", payload);
+}
+
+export function updateShift(id, payload) {
+  return api.patch(`/attendance/shifts/${id}`, payload);
+}
+
+export function deleteShift(id) {
+  return api.delete(`/attendance/shifts/${id}`);
+}
+
+export function getAttendanceReport(params) {
+  return api.get("/attendance/reports", { params });
+}

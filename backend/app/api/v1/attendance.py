@@ -9,11 +9,14 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.user import User
 from app.models.employee import Employee
-from app.models.attendance import Attendance
+from app.models.attendance import Attendance, Shift
 from app.schemas.attendance import (
     AttendanceCreate,
     AttendanceUpdate,
     AttendanceResponse,
+    ShiftCreate,
+    ShiftUpdate,
+    ShiftResponse,
 )
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
@@ -24,6 +27,29 @@ def require_hr(user: User):
         raise HTTPException(
             status_code=403,
             detail="Admin or HR permission required",
+        )
+
+
+def require_attendance_owner_or_hr(user: User, employee_id: int):
+    if user.role in ("ADMIN", "HR"):
+        return
+
+    if user.role != "EMPLOYEE":
+        raise HTTPException(
+            status_code=403,
+            detail="Admin, HR, or the linked employee is required.",
+        )
+
+    if user.employee_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Your login account is not linked to an employee record. Contact HR.",
+        )
+
+    if user.employee_id != employee_id:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only access your own attendance.",
         )
 
 
@@ -42,6 +68,112 @@ def validate_times(check_in, check_out):
         )
 
 
+
+
+def validate_shift_values(start_time, end_time, break_minutes):
+    start = datetime.combine(date.min, start_time)
+    end = datetime.combine(date.min, end_time)
+    if end <= start:
+        end += timedelta(days=1)
+    duration = int((end - start).total_seconds() // 60)
+    if break_minutes >= duration:
+        raise HTTPException(
+            status_code=422,
+            detail="Break must be shorter than the shift duration.",
+        )
+
+
+@router.get("/shifts", response_model=list[ShiftResponse])
+def list_shifts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_hr(current_user)
+    return db.scalars(select(Shift).order_by(Shift.name)).all()
+
+
+@router.post(
+    "/shifts",
+    response_model=ShiftResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_shift(
+    data: ShiftCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_hr(current_user)
+    validate_shift_values(data.start_time, data.end_time, data.break_minutes)
+
+    shift = Shift(**data.model_dump())
+    db.add(shift)
+    try:
+        db.commit()
+        db.refresh(shift)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="A shift with this name may already exist.",
+        )
+    return shift
+
+
+@router.patch("/shifts/{shift_id}", response_model=ShiftResponse)
+def update_shift(
+    shift_id: int,
+    data: ShiftUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_hr(current_user)
+    shift = db.get(Shift, shift_id)
+    if shift is None:
+        raise HTTPException(status_code=404, detail="Shift not found")
+
+    updates = data.model_dump(exclude_unset=True)
+    start_time = updates.get("start_time", shift.start_time)
+    end_time = updates.get("end_time", shift.end_time)
+    break_minutes = updates.get("break_minutes", shift.break_minutes)
+    validate_shift_values(start_time, end_time, break_minutes)
+
+    for field, value in updates.items():
+        setattr(shift, field, value)
+
+    try:
+        db.commit()
+        db.refresh(shift)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Shift name already exists or the update conflicts with existing records.",
+        )
+    return shift
+
+
+@router.delete("/shifts/{shift_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_shift(
+    shift_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_hr(current_user)
+    shift = db.get(Shift, shift_id)
+    if shift is None:
+        raise HTTPException(status_code=404, detail="Shift not found")
+
+    db.delete(shift)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This shift is assigned to attendance records and cannot be deleted.",
+        )
+
+
 @router.get("/", response_model=list[AttendanceResponse])
 def list_attendance(
     employee_id: int | None = Query(default=None, gt=0),
@@ -54,7 +186,20 @@ def list_attendance(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    require_hr(current_user)
+    if current_user.role == "EMPLOYEE":
+        if current_user.employee_id is None:
+            raise HTTPException(
+                status_code=403,
+                detail="Your login account is not linked to an employee record. Contact HR.",
+            )
+        if employee_id is not None and employee_id != current_user.employee_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only access your own attendance.",
+            )
+        employee_id = current_user.employee_id
+    else:
+        require_hr(current_user)
 
     if start_date and end_date and start_date > end_date:
         raise HTTPException(
@@ -104,6 +249,8 @@ def create_attendance(
     require_hr(current_user)
     validate_employee(db, data.employee_id)
     validate_times(data.check_in, data.check_out)
+    if data.shift_id is not None and db.get(Shift, data.shift_id) is None:
+        raise HTTPException(status_code=404, detail="Shift not found")
 
     existing = db.scalar(
         select(Attendance).where(
@@ -152,6 +299,10 @@ def update_attendance(
     validate_times(new_check_in, new_check_out)
 
     new_date = updates.get("attendance_date", record.attendance_date)
+    if "shift_id" in updates and updates["shift_id"] is not None:
+        if db.get(Shift, updates["shift_id"]) is None:
+            raise HTTPException(status_code=404, detail="Shift not found")
+
     duplicate = db.scalar(
         select(Attendance).where(
             Attendance.employee_id == record.employee_id,
@@ -206,7 +357,7 @@ def check_in(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    require_hr(current_user)
+    require_attendance_owner_or_hr(current_user, employee_id)
     employee = validate_employee(db, employee_id)
 
     if employee.employment_status != "Active":
@@ -263,7 +414,7 @@ def check_out(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    require_hr(current_user)
+    require_attendance_owner_or_hr(current_user, employee_id)
     validate_employee(db, employee_id)
 
     today = date.today()
@@ -297,20 +448,127 @@ def check_out(
     return record
 
 
+
+
+@router.get("/reports")
+def attendance_report(
+    start_date: date,
+    end_date: date,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_hr(current_user)
+
+    if start_date > end_date:
+        raise HTTPException(
+            status_code=422,
+            detail="start_date cannot be after end_date",
+        )
+    if (end_date - start_date).days > 365:
+        raise HTTPException(
+            status_code=422,
+            detail="Report range cannot exceed 366 calendar days.",
+        )
+
+    records = db.scalars(
+        select(Attendance)
+        .where(
+            Attendance.attendance_date >= start_date,
+            Attendance.attendance_date <= end_date,
+        )
+        .order_by(Attendance.attendance_date, Attendance.employee_id)
+    ).all()
+
+    counts = {"Present": 0, "Absent": 0, "Late": 0, "On Leave": 0}
+    daily = {}
+    employee_summary = {}
+    worked_values = []
+    overtime_values = []
+
+    bucket_date = start_date
+    while bucket_date <= end_date:
+        daily[bucket_date.isoformat()] = {
+            "date": bucket_date.isoformat(),
+            "total_records": 0,
+            "counts": {"Present": 0, "Absent": 0, "Late": 0, "On Leave": 0},
+            "worked_minutes": 0,
+            "worked_records": 0,
+            "overtime_minutes": 0,
+            "overtime_records": 0,
+        }
+        bucket_date += timedelta(days=1)
+
+    for record in records:
+        counts[record.status] = counts.get(record.status, 0) + 1
+        day = daily[record.attendance_date.isoformat()]
+        day["total_records"] += 1
+        day["counts"][record.status] = day["counts"].get(record.status, 0) + 1
+
+        employee_id = record.employee_id
+        employee_item = employee_summary.setdefault(employee_id, {
+            "employee_id": employee_id,
+            "total_records": 0,
+            "counts": {"Present": 0, "Absent": 0, "Late": 0, "On Leave": 0},
+            "worked_minutes": 0,
+            "worked_records": 0,
+            "overtime_minutes": 0,
+            "overtime_records": 0,
+        })
+        employee_item["total_records"] += 1
+        employee_item["counts"][record.status] = (
+            employee_item["counts"].get(record.status, 0) + 1
+        )
+
+        if record.worked_minutes is not None:
+            worked_values.append(record.worked_minutes)
+            day["worked_minutes"] += record.worked_minutes
+            day["worked_records"] += 1
+            employee_item["worked_minutes"] += record.worked_minutes
+            employee_item["worked_records"] += 1
+
+        if record.overtime_minutes is not None:
+            overtime_values.append(record.overtime_minutes)
+            day["overtime_minutes"] += record.overtime_minutes
+            day["overtime_records"] += 1
+            employee_item["overtime_minutes"] += record.overtime_minutes
+            employee_item["overtime_records"] += 1
+
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "total_records": len(records),
+        "counts": counts,
+        "total_worked_minutes": sum(worked_values) if worked_values else None,
+        "worked_records_count": len(worked_values),
+        "total_overtime_minutes": sum(overtime_values) if overtime_values else None,
+        "overtime_records_count": len(overtime_values),
+        "daily_summary": list(daily.values()),
+        "employee_summary": list(employee_summary.values()),
+    }
+
 @router.get("/summary/daily")
 def daily_attendance_summary(
     attendance_date: date | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    require_hr(current_user)
     target_date = attendance_date or date.today()
 
-    records = db.scalars(
-        select(Attendance).where(
-            Attendance.attendance_date == target_date
-        )
-    ).all()
+    query = select(Attendance).where(
+        Attendance.attendance_date == target_date
+    )
+
+    if current_user.role == "EMPLOYEE":
+        if current_user.employee_id is None:
+            raise HTTPException(
+                status_code=403,
+                detail="Your login account is not linked to an employee record. Contact HR.",
+            )
+        query = query.where(Attendance.employee_id == current_user.employee_id)
+    else:
+        require_hr(current_user)
+
+    records = db.scalars(query).all()
 
     counts = {
         "Present": 0,

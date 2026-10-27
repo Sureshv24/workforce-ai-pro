@@ -61,10 +61,11 @@ def calculate_balance(db: Session, balance: LeaveBalance) -> dict:
 @router.get("/", response_model=list[LeaveBalanceResponse])
 def list_leave_balances(
     employee_id: int | None = Query(default=None, gt=0),
-    year: int = Query(default_factory=date.today().year, ge=2000, le=2100),
+    year: int = Query(default=None, ge=2000, le=2100),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    year = year or date.today().year
     query = select(LeaveBalance).where(LeaveBalance.year == year)
 
     if user.role in ("ADMIN", "HR"):
@@ -72,7 +73,7 @@ def list_leave_balances(
             query = query.where(LeaveBalance.employee_id == employee_id)
     else:
         employee = db.scalar(
-            select(Employee).where(Employee.employee_code == user.email)
+            select(Employee).where(Employee.id == user.employee_id)
         )
         if employee is None:
             raise HTTPException(
@@ -123,17 +124,24 @@ def create_or_update_leave_balance(
 @router.get("/{employee_id}", response_model=list[LeaveBalanceResponse])
 def get_employee_leave_balances(
     employee_id: int,
-    year: int = Query(default_factory=date.today().year, ge=2000, le=2100),
+    year: int = Query(default=None, ge=2000, le=2100),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    year = year or date.today().year
+
     if user.role in ("ADMIN", "HR"):
         employee = db.get(Employee, employee_id)
     else:
         employee = db.scalar(
-            select(Employee).where(Employee.employee_code == user.email)
+            select(Employee).where(Employee.id == user.employee_id)
         )
-        if employee is not None and employee.id != employee_id:
+        if employee is None:
+            raise HTTPException(
+                status_code=403,
+                detail="Your account is not linked to an employee. Contact HR.",
+            )
+        if employee.id != employee_id:
             raise HTTPException(
                 status_code=403,
                 detail="You can only view your own leave balances.",

@@ -119,14 +119,7 @@ export default function LeaveManagement({ currentUser }) {
     setError("");
     setNotice("");
 
-    if (!isHR) {
-      setError(
-        "Employee self-service requires a verified employee-to-user account mapping."
-      );
-      return;
-    }
-
-    if (!form.employee_id) {
+    if (isHR && !form.employee_id) {
       setError("Please select an employee.");
       return;
     }
@@ -139,10 +132,14 @@ export default function LeaveManagement({ currentUser }) {
     setSaving(true);
 
     try {
-      await createLeaveRequest({
-        ...form,
-        employee_id: Number(form.employee_id),
-      });
+      const payload = {
+        leave_type: form.leave_type,
+        start_date: form.start_date,
+        end_date: form.end_date,
+        reason: form.reason,
+      };
+      if (isHR) payload.employee_id = Number(form.employee_id);
+      await createLeaveRequest(payload);
       setForm(emptyForm);
       setNotice("Leave request submitted successfully.");
       await loadData();
@@ -230,7 +227,7 @@ export default function LeaveManagement({ currentUser }) {
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <div className="mb-2 flex items-center gap-2 text-sm text-slate-500">
-            <CalendarDays size={17} /> HR WORKSPACE
+            <CalendarDays size={17} /> {isHR ? "HR WORKSPACE" : "EMPLOYEE SELF-SERVICE"}
           </div>
           <h1 className="text-2xl font-semibold text-slate-900">
             Leave Management
@@ -386,17 +383,19 @@ export default function LeaveManagement({ currentUser }) {
         )}
       </section>
 
-      {isHR ? (
-        <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="text-lg font-semibold text-slate-900">
-            Submit a leave request
+            {isHR ? "Submit a leave request" : "Request leave"}
           </h2>
           <p className="mb-5 mt-1 text-sm text-slate-500">
-            Select the employee and enter the requested leave details.
+            {isHR
+              ? "Select the employee and enter the requested leave details."
+              : "Submit a request for your linked employee account."}
           </p>
 
           <form onSubmit={submitRequest} className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <label className="text-sm font-medium text-slate-700">
+            {isHR && (
+<label className="text-sm font-medium text-slate-700">
               Employee
               <select
                 required
@@ -414,6 +413,7 @@ export default function LeaveManagement({ currentUser }) {
                 ))}
               </select>
             </label>
+            )}
 
             <label className="text-sm font-medium text-slate-700">
               Leave type
@@ -477,26 +477,19 @@ export default function LeaveManagement({ currentUser }) {
             <div className="md:col-span-2">
               <button
                 type="submit"
-                disabled={saving || employees.length === 0}
+                disabled={saving || (isHR && employees.length === 0)}
                 className="rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {saving ? "Submitting..." : "Submit leave request"}
+                {saving ? "Submitting..." : isHR ? "Submit leave request" : "Request leave"}
               </button>
-              {employees.length === 0 && (
+              {isHR && employees.length === 0 && (
                 <p className="mt-2 text-sm text-amber-700">
                   No employees loaded. Check employee API permissions.
                 </p>
               )}
             </div>
           </form>
-        </section>
-      ) : (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-          You can view your own requests if your employee account is linked.
-          Employee self-service submission needs a verified employee mapping.
-          Please contact HR if your requests cannot be loaded.
-        </div>
-      )}
+      </section>
 
       <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-5">

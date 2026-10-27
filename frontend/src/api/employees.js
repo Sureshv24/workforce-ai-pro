@@ -14,3 +14,6 @@ export const updateEmployee = (id, data) =>
 
 export const deleteEmployee = (id) =>
   api.delete(`/employees/${id}`);
+
+export const linkEmployeeAccount = (id, data) =>
+  api.put(`/employees/${id}/account`, data);

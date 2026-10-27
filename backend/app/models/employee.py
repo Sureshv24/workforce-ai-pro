@@ -1,6 +1,6 @@
 ﻿from datetime import date
 from sqlalchemy import Date, ForeignKey, Integer, String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.session import Base
 
 
@@ -17,6 +17,18 @@ class Employee(Base):
     )
     job_title: Mapped[str | None] = mapped_column(String(100), nullable=True)
     hire_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    exit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     employment_status: Mapped[str] = mapped_column(
         String(30), default="Active"
     )
+
+    user_account: Mapped["User | None"] = relationship(
+        "User",
+        uselist=False,
+        foreign_keys="User.employee_id",
+        lazy="selectin",
+    )
+
+    @property
+    def account_linked(self) -> bool:
+        return self.user_account is not None

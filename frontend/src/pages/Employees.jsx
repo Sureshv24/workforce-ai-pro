@@ -1,5 +1,5 @@
 ﻿import { useEffect, useState } from "react";
-import { getEmployees, createEmployee, updateEmployee, deleteEmployee } from "../api/employees";
+import { getEmployees, createEmployee, updateEmployee, deleteEmployee, linkEmployeeAccount } from "../api/employees";
 import { getDepartments } from "../api/departments";
 
 const emptyForm = {
@@ -8,6 +8,7 @@ const emptyForm = {
   department_id: "",
   job_title: "",
   hire_date: "",
+  exit_date: "",
   employment_status: "Active",
 };
 
@@ -20,7 +21,11 @@ export default function Employees() {
   const [departmentId, setDepartmentId] = useState("");
   const [page, setPage] = useState(1);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
+  const [linkingEmployee, setLinkingEmployee] = useState(null);
+  const [accountEmail, setAccountEmail] = useState("");
+  const [linking, setLinking] = useState(false);
 
   async function loadData() {
     setLoading(true);
@@ -66,6 +71,7 @@ export default function Employees() {
       ...form,
       department_id: form.department_id ? Number(form.department_id) : null,
       hire_date: form.hire_date || null,
+      exit_date: form.exit_date || null,
     };
 
     try {
@@ -91,10 +97,47 @@ export default function Employees() {
       department_id: employee.department_id ?? "",
       job_title: employee.job_title || "",
       hire_date: employee.hire_date || "",
+      exit_date: employee.exit_date || "",
       employment_status: employee.employment_status || "Active",
     });
 
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function handleLinkAccount(event) {
+    event.preventDefault();
+
+    if (!linkingEmployee) return;
+
+    const email = accountEmail.trim();
+    if (!email) {
+      setError("Enter the email address of an existing login account.");
+      return;
+    }
+
+    setError("");
+    setNotice("");
+    setLinking(true);
+
+    try {
+      await linkEmployeeAccount(linkingEmployee.id, { email });
+
+      setNotice(
+        `Login account linked to ${linkingEmployee.full_name} successfully.`
+      );
+      setLinkingEmployee(null);
+      setAccountEmail("");
+      await loadData();
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      setError(
+        typeof detail === "string"
+          ? detail
+          : "Unable to link the login account. Verify the email and your permissions."
+      );
+    } finally {
+      setLinking(false);
+    }
   }
 
   async function handleDelete(employee) {
@@ -125,6 +168,72 @@ export default function Employees() {
         </div>
       )}
 
+      {notice && (
+        <div
+          role="status"
+          className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800"
+        >
+          {notice}
+        </div>
+      )}
+
+      {linkingEmployee && (
+        <form
+          onSubmit={handleLinkAccount}
+          className="space-y-4 rounded-xl border border-indigo-200 bg-white p-5"
+        >
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">
+              Link login account
+            </h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Employee: {linkingEmployee.full_name} (
+              {linkingEmployee.employee_code})
+            </p>
+            <p className="mt-1 text-sm text-slate-500">
+              Enter the email address of an existing user account.
+            </p>
+          </div>
+
+          <label className="block text-sm font-medium text-slate-700">
+            Login account email
+            <input
+              required
+              type="email"
+              maxLength={255}
+              autoComplete="off"
+              value={accountEmail}
+              onChange={(event) => setAccountEmail(event.target.value)}
+              placeholder="employee@company.com"
+              className="mt-1 block w-full rounded-lg border border-slate-300 p-3 font-normal"
+            />
+          </label>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="submit"
+              disabled={linking}
+              className="rounded-lg bg-indigo-600 px-5 py-2.5 font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+            >
+              {linking ? "Linking account..." : "Link account"}
+            </button>
+
+            <button
+              type="button"
+              disabled={linking}
+              onClick={() => {
+                setLinkingEmployee(null);
+                setAccountEmail("");
+                setError("");
+              }}
+              className="rounded-lg border border-slate-300 px-5 py-2.5"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+
       <form onSubmit={handleSubmit} className="grid gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:grid-cols-2 lg:grid-cols-3">
         <h2 className="text-lg font-semibold sm:col-span-2 lg:col-span-3">
           {editingId !== null ? "Edit employee" : "Add employee"}
@@ -150,8 +259,34 @@ export default function Employees() {
           ))}
         </select>
 
-        <input type="date" name="hire_date" value={form.hire_date}
-          onChange={handleChange} className="rounded-lg border p-3" />
+        <label className="text-sm text-slate-600">
+          Hire date *
+          <input
+            required
+            type="date"
+            name="hire_date"
+            value={form.hire_date}
+            onChange={handleChange}
+            className="mt-1 block w-full rounded-lg border p-3"
+            aria-label="Hire date"
+            title="Hire date is required"
+          />
+        </label>
+
+        <label className="text-sm text-slate-600">
+          Exit date {form.employment_status === "Inactive" ? "*" : "(optional)"}
+          <input
+            type="date"
+            name="exit_date"
+            value={form.exit_date}
+            min={form.hire_date || undefined}
+            required={form.employment_status === "Inactive"}
+            onChange={handleChange}
+            className="mt-1 block w-full rounded-lg border p-3"
+            aria-label="Exit date"
+            title="Inactive employees require an exit date"
+          />
+        </label>
 
         <select name="employment_status" value={form.employment_status}
           onChange={handleChange} className="rounded-lg border bg-white p-3">
@@ -196,16 +331,16 @@ export default function Employees() {
         <table className="w-full text-left text-sm">
           <thead className="bg-slate-50 text-slate-600">
             <tr>
-              {["Code", "Employee", "Department", "Job title", "Status", "Actions"].map((heading) => (
+              {["Code", "Employee", "Department", "Job title", "Status", "Account", "Actions"].map((heading) => (
                 <th key={heading} className="whitespace-nowrap px-4 py-3 font-semibold">{heading}</th>
               ))}
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {loading ? (
-              <tr><td colSpan="6" className="p-8 text-center">Loading employees...</td></tr>
+              <tr><td colSpan="7" className="p-8 text-center">Loading employees...</td></tr>
             ) : employees.length === 0 ? (
-              <tr><td colSpan="6" className="p-8 text-center text-slate-500">No employee records found.</td></tr>
+              <tr><td colSpan="7" className="p-8 text-center text-slate-500">No employee records found.</td></tr>
             ) : employees.map((employee) => (
               <tr key={employee.id} className="hover:bg-slate-50">
                 <td className="whitespace-nowrap px-4 py-3">{employee.employee_code}</td>
@@ -216,6 +351,31 @@ export default function Employees() {
                 <td className="whitespace-nowrap px-4 py-3">{employee.job_title || "—"}</td>
                 <td className="whitespace-nowrap px-4 py-3">{employee.employment_status}</td>
                 <td className="whitespace-nowrap px-4 py-3">
+                  {employee.account_linked ? (
+                    <span className="inline-flex rounded-full bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">
+                      Linked
+                    </span>
+                  ) : (
+                    <span className="inline-flex rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600">
+                      Not linked
+                    </span>
+                  )}
+                </td>
+                <td className="whitespace-nowrap px-4 py-3">
+                  {!employee.account_linked && (
+                    <button
+                      onClick={() => {
+                        setError("");
+                        setNotice("");
+                        setLinkingEmployee(employee);
+                        setAccountEmail("");
+                        window.scrollTo({ top: 0, behavior: "smooth" });
+                      }}
+                      className="mr-3 font-medium text-emerald-700"
+                    >
+                      Link account
+                    </button>
+                  )}
                   <button onClick={() => startEdit(employee)} className="mr-3 font-medium text-indigo-600">Edit</button>
                   <button onClick={() => handleDelete(employee)} className="font-medium text-red-600">Delete</button>
                 </td>

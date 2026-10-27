@@ -19,9 +19,9 @@ import {
 
 const initialStats = [
   { label: "Total Employees", value: "1,248", change: "+12.5%", up: true, icon: Users },
-  { label: "Attrition Rate", value: "12.8%", change: "-2.4%", up: true, icon: UserMinus },
+  { label: "Attrition Rate", value: "", change: "", up: false, icon: UserMinus },
   { label: "High Risk Employees", value: "86", change: "+4.2%", up: false, icon: Activity },
-  { label: "Retention Rate", value: "87.2%", change: "+2.4%", up: true, icon: UserCheck },
+  { label: "Retention Rate", value: "", change: "", up: true, icon: UserCheck },
 ];
 
 const departments = [
@@ -60,6 +60,17 @@ function App() {
       return null;
     }
   });
+
+  const isHR = ["ADMIN", "HR"].includes(
+    String(currentUser?.role || "").toUpperCase()
+  );
+
+  useEffect(() => {
+    if (!isHR && ["Employees", "Departments"].includes(page)) {
+      setPage("Overview");
+    }
+  }, [isHR, page]);
+
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authChecking, setAuthChecking] = useState(
     Boolean(localStorage.getItem("access_token"))
@@ -85,6 +96,7 @@ function App() {
       .finally(() => setAuthChecking(false));
   }, []);
   const [dashboardSummary, setDashboardSummary] = useState(null);
+  const [dashboardPeriod, setDashboardPeriod] = useState("last_30_days");
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [dashboardError, setDashboardError] = useState("");
   const [predictionSummary, setPredictionSummary] = useState(null);
@@ -156,7 +168,7 @@ function App() {
     setDashboardLoading(true);
     setDashboardError("");
 
-    api.get("/dashboard/summary")
+    api.get("/dashboard/summary", { params: { period: dashboardPeriod } })
       .then((response) => {
         if (!cancelled) setDashboardSummary(response.data);
       })
@@ -175,7 +187,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated]);
+  }, [isAuthenticated, dashboardPeriod]);
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -369,7 +381,7 @@ function App() {
 
         <div className="workspace-label">WORKSPACE</div>
         <nav>
-          {nav.map(item => (
+          {nav.filter(item => isHR || !["Employees", "Departments"].includes(item.label)).map(item => (
             <button key={item.label}
               className={`nav-item ${page === item.label ? "active" : ""}`}
               onClick={() => { setPage(item.label); setSidebarOpen(false); }}>
@@ -389,8 +401,28 @@ function App() {
             <p>Turn workforce data into smarter decisions.</p>
           </div>
           <div className="profile">
-            <div className="avatar">SV</div>
-            <div className="profile-info"><strong>HR Administrator</strong><small>Administrator</small></div>
+            <div className="avatar">
+              {(currentUser?.full_name || currentUser?.email || "SV")
+                .slice(0, 2)
+                .toUpperCase()}
+            </div>
+            <div className="profile-info">
+              <strong>
+                {currentUser?.full_name ||
+                  currentUser?.name ||
+                  currentUser?.email?.split("@")[0] ||
+                  "User"}
+              </strong>
+              <small>
+                {{
+                  ADMIN: "Administrator",
+                  HR: "HR",
+                  EMPLOYEE: "Employee",
+                }[String(currentUser?.role || "").toUpperCase()] ||
+                  currentUser?.role ||
+                  "User"}
+              </small>
+            </div>
             <ChevronDown size={17}/>
           </div>
         </div>
@@ -429,7 +461,17 @@ function App() {
           {page === "Overview" && <>
             <section className="welcome-row">
               <div><div className="eyebrow"><span/> WORKFORCE ANALYTICS</div><h1>Good afternoon, Admin <span>✦</span></h1><p>Here's what's happening with your workforce today.</p></div>
-              <select className="period-select" value={period} onChange={e => setPeriod(e.target.value)}><option>Last 7 days</option><option>Last 30 days</option><option>Last 90 days</option></select>
+              <select
+                value={dashboardPeriod}
+                onChange={(event) => setDashboardPeriod(event.target.value)}
+                className="period-select"
+                aria-label="Dashboard reporting period"
+              >
+                <option value="last_30_days">Last 30 days</option>
+                <option value="month_to_date">Month to date</option>
+                <option value="last_90_days">Last 90 days</option>
+                <option value="year_to_date">Year to date</option>
+              </select>
             </section>
 
             <section className="stat-grid">
@@ -443,6 +485,62 @@ function App() {
                     ? String(dashboardSummary.total_employees ?? 0)
                     : dashboardLoading ? "Loading..." : "?";
                   note = dashboardError || "Live database count";
+                } else if (
+                  s.label === "Attrition Rate" ||
+                  s.label === "Retention Rate"
+                ) {
+                  const analytics = dashboardSummary?.attrition_analytics;
+                  const metricKey =
+                    s.label === "Attrition Rate"
+                      ? "attrition_rate_pct"
+                      : "retention_rate_pct";
+                  const metric = analytics?.[metricKey];
+
+                  if (!dashboardSummary) {
+                    value = dashboardLoading ? "Loading..." : "Unavailable";
+                    note = dashboardError || "Workforce analytics unavailable";
+                  } else if (!analytics) {
+                    value = "Unavailable";
+                    note =
+                      "Analytics not returned by the backend. Restart FastAPI if needed.";
+                  } else if (!analytics.data_complete) {
+                    const dataIssues = [];
+                    if (analytics.missing_hire_date_count) {
+                      dataIssues.push(
+                        `${analytics.missing_hire_date_count} employee(s) missing hire dates`
+                      );
+                    }
+                    if (analytics.inactive_missing_exit_date_count) {
+                      dataIssues.push(
+                        `${analytics.inactive_missing_exit_date_count} inactive employee(s) missing exit dates`
+                      );
+                    }
+                    if (analytics.status_date_conflict_count) {
+                      dataIssues.push(
+                        `${analytics.status_date_conflict_count} active/on-leave record(s) have exit dates`
+                      );
+                    }
+                    if (analytics.invalid_date_order_count) {
+                      dataIssues.push(
+                        `${analytics.invalid_date_order_count} record(s) have an exit date before hire date`
+                      );
+                    }
+                    value = "N/A";
+                    note = `Incomplete employment history: ${
+                      dataIssues.join("; ") || "records need review"
+                    }.`;
+                  } else if (metric == null) {
+                    value = "N/A";
+                    note =
+                      s.label === "Attrition Rate"
+                        ? "No average headcount available for this reporting period."
+                        : "No opening workforce cohort available for this reporting period.";
+                  } else {
+                    value = `${Number(metric).toFixed(2)}%`;
+                    note =
+                      `${analytics.period_label || "Reporting period"}: ` +
+                      `${analytics.period_start} to ${analytics.period_end}`;
+                  }
                 } else if (s.label === "High Risk Employees") {
                   value = predictionSummary
                     ? String(predictionSummary.total ?? 0)
@@ -534,6 +632,98 @@ function App() {
               </article>
             </section>
 
+
+            <section className="panel page-panel">
+              <div className="panel-heading">
+                <div>
+                  <h2>Employee exit history</h2>
+                  <p>Recorded exits for the selected reporting period</p>
+                </div>
+                <span className="model-badge">EXIT HISTORY</span>
+              </div>
+
+              {!dashboardSummary?.attrition_analytics ? (
+                <div className="empty-state">
+                  {dashboardLoading
+                    ? "Loading employee exit history..."
+                    : dashboardError || "Employee exit history is unavailable."}
+                </div>
+              ) : (() => {
+                const analytics = dashboardSummary.attrition_analytics;
+                const points = Array.isArray(analytics.exit_trend)
+                  ? analytics.exit_trend
+                  : [];
+                const maxExits = Math.max(
+                  1,
+                  ...points.map((point) => Number(point.exits) || 0)
+                );
+
+                return (
+                  <>
+                    {!analytics.exit_history_complete && (
+                      <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                        Exit history is incomplete. The chart includes recorded exit dates only.
+                        {analytics.inactive_missing_exit_date_count > 0
+                          ? ` ${analytics.inactive_missing_exit_date_count} inactive employee(s) have no exit date.`
+                          : ""}
+                        {analytics.status_date_conflict_count > 0
+                          ? ` ${analytics.status_date_conflict_count} active/on-leave record(s) have an exit date.`
+                          : ""}
+                        {analytics.invalid_date_order_count > 0
+                          ? ` ${analytics.invalid_date_order_count} record(s) have an exit date before hire date.`
+                          : ""}
+                      </div>
+                    )}
+
+                    <div className="overflow-x-auto">
+                      <div className="flex h-56 min-w-[760px] items-end gap-1 border-b border-slate-100 pb-2">
+                        {points.map((point, index) => {
+                          const count = Number(point.exits) || 0;
+                          const height =
+                            count === 0
+                              ? 2
+                              : Math.max(8, (count / maxExits) * 100);
+
+                          return (
+                            <div
+                              key={`${point.date}-${index}`}
+                              title={`${point.label}: ${count} recorded exit(s)`}
+                              className="flex h-full min-w-0 flex-1 flex-col items-center justify-end gap-1"
+                            >
+                              <span className="text-xs text-slate-500">{count}</span>
+                              <div
+                                className="w-full max-w-8 rounded-t bg-indigo-500"
+                                style={{ height: `${height}%` }}
+                              />
+                              <span className="w-full truncate text-center text-[10px] text-slate-500">
+                                {point.label}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {points.length === 0 && (
+                      <div className="empty-state">No trend buckets are available for this period.</div>
+                    )}
+
+                    {analytics.exits_during_period === 0 &&
+                      analytics.exit_history_complete && (
+                        <p className="mt-3 text-sm text-slate-500">
+                          No recorded exits during this reporting period.
+                        </p>
+                      )}
+
+                    <p className="mt-3 text-xs text-slate-500">
+                      {analytics.period_label}: {analytics.period_start} to {analytics.period_end}.
+                      {' '}Counts use recorded exit dates; incomplete records are flagged above.
+                    </p>
+                  </>
+                );
+              })()}
+            </section>
+
             <section className="panel employee-panel">
               <div className="panel-heading employee-heading"><div><h2>Employee risk overview</h2><p>Live employee records and latest saved predictions</p></div><div className="table-actions"><div className="search-box"><Search size={17}/><input placeholder="Search employees..." value={search} onChange={e=>setSearch(e.target.value)}/></div><button className="subtle-button" onClick={()=>setPage("Employees")}>View all <ArrowUpRight size={15}/></button></div></div>
               <div className="table-scroll"><table><thead><tr><th>EMPLOYEE</th><th>DEPARTMENT</th><th>ATTRITION RISK</th><th>RISK SCORE</th><th/></tr></thead><tbody>
@@ -545,9 +735,9 @@ function App() {
             <footer className="footer"><span>© 2026 WorkForce AI Pro</span><span>Workforce Intelligence Platform <span className="footer-dot">•</span> v1.0.0</span></footer>
           </>}
 
-          {page === "Employees" && <Employees /> }
+          {isHR && page === "Employees" && <Employees /> }
 
-          {page === "Departments" && <Departments /> }
+          {isHR && page === "Departments" && <Departments /> }
 
           {page === "AI Predictions" && <section className="prediction-layout"><article className="panel page-panel"><div className="panel-heading"><div><h2><BrainCircuit size={21} className="inline-icon"/> Attrition prediction</h2><p>Submit employee attributes to the backend ML model.</p></div><span className="model-badge">ML MODEL</span></div><form className="prediction-form" onSubmit={predictAttrition}>{Object.entries(form).map(([key,value])=><label key={key}>{key.replaceAll("_"," ")}{key==="overtime"?<select value={value} onChange={e=>setForm({...form,[key]:e.target.value})}><option>Yes</option><option>No</option></select>:<input type="number" min={key==="job_satisfaction"||key==="work_life_balance"?1:0} max={key==="job_satisfaction"||key==="work_life_balance"?4:undefined} required value={value} onChange={e=>setForm({...form,[key]:e.target.value})}/>}</label>)}<button className="primary-button" disabled={prediction?.loading}>{prediction?.loading?"Predicting...":"Run attrition prediction"} <ArrowUpRight size={17}/></button></form></article><article className="panel prediction-result"><div className="result-icon"><BrainCircuit size={25}/></div><h2>Prediction result</h2><p>Run a prediction to view the response from your API.</p>{prediction?.error&&<div className="error-box">{prediction.error}<p>Check that the backend is running and your login token is valid.</p></div>}{prediction&&!prediction.error&&!prediction.loading&&<div className="result-data"><div className="result-risk">{String(prediction.risk_level??(prediction.predicted_attrition?"High":"Low")).replaceAll("_"," ")}</div><div>Employee ID: {prediction.employee_id}</div>{prediction.predicted_attrition!==undefined&&<div>Predicted attrition: {String(prediction.predicted_attrition)}</div>}{prediction.risk_score!==undefined&&<div>Risk score: {prediction.risk_score}</div>}<pre>{JSON.stringify(prediction,null,2)}</pre></div>}<div className="result-disclaimer">Model outputs support workforce analysis; they should not be used alone to make employment decisions.</div></article></section>}
 

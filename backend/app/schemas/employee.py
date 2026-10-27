@@ -9,6 +9,7 @@ class EmployeeCreate(BaseModel):
     department_id: int | None = None
     job_title: str | None = Field(default=None, max_length=100)
     hire_date: date | None = None
+    exit_date: date | None = None
     employment_status: str = "Active"
 
 
@@ -18,9 +19,11 @@ class EmployeeUpdate(BaseModel):
     department_id: int | None = None
     job_title: str | None = Field(default=None, max_length=100)
     hire_date: date | None = None
+    exit_date: date | None = None
     employment_status: str | None = None
 
 
 class EmployeeResponse(EmployeeCreate):
     id: int
+    account_linked: bool
     model_config = ConfigDict(from_attributes=True)

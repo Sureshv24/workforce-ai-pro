@@ -1,0 +1,816 @@
+﻿import { useCallback, useEffect, useState } from "react";
+import { getEmployees } from "../api/employees";
+import {
+  getAttendance,
+  createAttendance,
+  updateAttendance,
+  deleteAttendance,
+  checkIn,
+  checkOut,
+  getDailyAttendanceSummary,
+  getShifts,
+  createShift,
+  updateShift,
+  deleteShift,
+  getAttendanceReport,
+} from "../api/attendance";
+
+const today = () => {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+};
+
+const emptyForm = {
+  employee_id: "",
+  shift_id: "",
+  attendance_date: today(),
+  check_in: "",
+  check_out: "",
+  status: "Present",
+  remarks: "",
+};
+
+function toLocalInput(value) {
+  if (!value) return "";
+
+  // Preserve naive timestamps returned by the backend as local wall-clock times.
+  if (typeof value === "string") {
+    const match = value.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
+    const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+
+    if (match && !hasTimezone) {
+      return `${match[1]}T${match[2]}`;
+    }
+  }
+
+  // Convert timezone-aware timestamps to local time for datetime-local inputs.
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
+}
+
+function errorMessage(error, fallback) {
+  const detail = error.response?.data?.detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) return detail.map((item) => item.msg).join(", ");
+  return fallback;
+}
+
+export default function Attendance() {
+  const [records, setRecords] = useState([]);
+  const [employees, setEmployees] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [form, setForm] = useState(emptyForm);
+  const [editingId, setEditingId] = useState(null);
+  const [filterDate, setFilterDate] = useState(today());
+  const [filterStatus, setFilterStatus] = useState("");
+  const [filterEmployee, setFilterEmployee] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [shifts, setShifts] = useState([]);
+  const [shiftForm, setShiftForm] = useState({
+    name: "",
+    start_time: "09:00",
+    end_time: "17:00",
+    break_minutes: 60,
+  });
+  const [editingShiftId, setEditingShiftId] = useState(null);
+  const [savingShift, setSavingShift] = useState(false);
+  const [reportStartDate, setReportStartDate] = useState(today());
+  const [reportEndDate, setReportEndDate] = useState(today());
+  const [attendanceReport, setAttendanceReport] = useState(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportError, setReportError] = useState("");
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    setError("");
+
+    try {
+      const params = { page: 1, page_size: 100 };
+      if (filterDate) params.attendance_date = filterDate;
+      if (filterStatus) params.status = filterStatus;
+      if (filterEmployee) params.employee_id = Number(filterEmployee);
+
+      const [
+        attendanceResponse,
+        employeeResponse,
+        summaryResponse,
+        shiftResponse,
+      ] = await Promise.all([
+        getAttendance(params),
+        getEmployees({ page: 1, page_size: 100 }),
+        getDailyAttendanceSummary(filterDate || today()),
+        getShifts(),
+      ]);
+
+      setRecords(Array.isArray(attendanceResponse.data) ? attendanceResponse.data : []);
+      setEmployees(
+        Array.isArray(employeeResponse.data)
+          ? employeeResponse.data
+          : employeeResponse.data?.items || employeeResponse.data?.results || []
+      );
+      setSummary(summaryResponse.data);
+      setShifts(
+        Array.isArray(shiftResponse.data) ? shiftResponse.data : []
+      );
+    } catch (err) {
+      setError(errorMessage(
+        err,
+        "Unable to load attendance. Check your login, HR/Admin permissions, and backend."
+      ));
+    } finally {
+      setLoading(false);
+    }
+  }, [filterDate, filterStatus, filterEmployee]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  function changeForm(event) {
+    setForm((current) => ({
+      ...current,
+      [event.target.name]: event.target.value,
+    }));
+  }
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    setNotice("");
+
+    const payload = {
+      employee_id: Number(form.employee_id),
+      shift_id: form.shift_id ? Number(form.shift_id) : null,
+      attendance_date: form.attendance_date,
+      // Preserve local wall-clock time for the backend's naive DateTime columns.
+      check_in: form.check_in ? form.check_in.replace("T", " ") : null,
+      check_out: form.check_out ? form.check_out.replace("T", " ") : null,
+      status: form.status,
+      remarks: form.remarks.trim() || null,
+    };
+
+    try {
+      if (editingId !== null) {
+        delete payload.employee_id;
+        await updateAttendance(editingId, payload);
+        setNotice("Attendance record updated successfully.");
+      } else {
+        await createAttendance(payload);
+        setNotice("Attendance record created successfully.");
+      }
+
+      setForm({ ...emptyForm, attendance_date: filterDate || today() });
+      setEditingId(null);
+      await loadData();
+    } catch (err) {
+      setError(errorMessage(err, "Unable to save attendance record."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function startEdit(record) {
+    setEditingId(record.id);
+    setForm({
+      employee_id: String(record.employee_id),
+      shift_id: record.shift_id == null ? "" : String(record.shift_id),
+      attendance_date: record.attendance_date,
+      check_in: toLocalInput(record.check_in),
+      check_out: toLocalInput(record.check_out),
+      status: record.status,
+      remarks: record.remarks || "",
+    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function handleDelete(record) {
+    if (!window.confirm(`Delete attendance record #${record.id}?`)) return;
+    setError("");
+    setNotice("");
+
+    try {
+      await deleteAttendance(record.id);
+      setNotice("Attendance record deleted.");
+      await loadData();
+    } catch (err) {
+      setError(errorMessage(err, "Unable to delete attendance."));
+    }
+  }
+
+  async function handlePunch(employeeId, action) {
+    setError("");
+    setNotice("");
+
+    try {
+      if (action === "in") {
+        await checkIn(employeeId);
+        setNotice(`Check-in recorded for employee #${employeeId}.`);
+      } else {
+        await checkOut(employeeId);
+        setNotice(`Check-out recorded for employee #${employeeId}.`);
+      }
+      await loadData();
+    } catch (err) {
+      setError(errorMessage(err, `Unable to check ${action === "in" ? "in" : "out"}.`));
+    }
+  }
+
+  async function handleShiftSubmit(event) {
+    event.preventDefault();
+    setError("");
+    setNotice("");
+    setSavingShift(true);
+
+    const payload = {
+      name: shiftForm.name.trim(),
+      start_time: shiftForm.start_time,
+      end_time: shiftForm.end_time,
+      break_minutes: Number(shiftForm.break_minutes),
+    };
+
+    try {
+      if (editingShiftId !== null) {
+        await updateShift(editingShiftId, payload);
+        setNotice("Shift updated successfully.");
+      } else {
+        await createShift(payload);
+        setNotice("Shift created successfully.");
+      }
+
+      setShiftForm({
+        name: "",
+        start_time: "09:00",
+        end_time: "17:00",
+        break_minutes: 60,
+      });
+      setEditingShiftId(null);
+      await loadData();
+    } catch (err) {
+      setError(errorMessage(err, "Unable to save shift."));
+    } finally {
+      setSavingShift(false);
+    }
+  }
+
+  async function handleDeleteShift(shift) {
+    if (!window.confirm(`Delete shift "${shift.name}"?`)) return;
+
+    setError("");
+    setNotice("");
+
+    try {
+      await deleteShift(shift.id);
+      setNotice("Shift deleted successfully.");
+      if (editingShiftId === shift.id) {
+        setEditingShiftId(null);
+        setShiftForm({
+          name: "",
+          start_time: "09:00",
+          end_time: "17:00",
+          break_minutes: 60,
+        });
+      }
+      await loadData();
+    } catch (err) {
+      setError(errorMessage(
+        err,
+        "Unable to delete shift. It may be assigned to attendance records."
+      ));
+    }
+  }
+
+  async function loadReport(event) {
+    event?.preventDefault();
+    setReportError("");
+    setReportLoading(true);
+
+    try {
+      const response = await getAttendanceReport({
+        start_date: reportStartDate,
+        end_date: reportEndDate,
+      });
+      setAttendanceReport(response.data);
+    } catch (err) {
+      setReportError(errorMessage(err, "Unable to load attendance report."));
+      setAttendanceReport(null);
+    } finally {
+      setReportLoading(false);
+    }
+  }
+
+  function formatMinutes(minutes) {
+    if (minutes == null) return "?";
+    const value = Number(minutes);
+    return `${Math.floor(value / 60)}h ${value % 60}m`;
+  }
+
+  const summaryCards = [
+    { label: "Total records", value: summary?.total_records ?? "—" },
+    { label: "Present", value: summary?.counts?.Present ?? 0 },
+    { label: "Absent", value: summary?.counts?.Absent ?? 0 },
+    { label: "Late", value: summary?.counts?.Late ?? 0 },
+    { label: "On leave", value: summary?.counts?.["On Leave"] ?? 0 },
+  ];
+
+  return (
+    <section className="space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">Attendance Management</h1>
+          <p className="mt-1 text-sm text-slate-500">
+            Manage daily attendance using live workforce records.
+          </p>
+        </div>
+        <button onClick={loadData} className="rounded-lg border bg-white px-4 py-2">
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+      {notice && (
+        <div role="status" className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">
+          {notice}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+        {summaryCards.map((item) => (
+          <article key={item.label} className="rounded-xl border bg-white p-4">
+            <p className="text-sm text-slate-500">{item.label}</p>
+            <p className="mt-2 text-2xl font-bold text-slate-900">{item.value}</p>
+          </article>
+        ))}
+      </div>
+
+      <form onSubmit={handleSubmit} className="grid gap-4 rounded-xl border bg-white p-5 md:grid-cols-2 xl:grid-cols-3">
+        <h2 className="text-lg font-semibold md:col-span-2 xl:col-span-3">
+          {editingId !== null ? "Edit attendance" : "Add attendance"}
+        </h2>
+
+        <label className="grid gap-1 text-sm font-medium text-slate-700">
+          Employee
+          <select
+            name="employee_id"
+            required
+            disabled={editingId !== null}
+            value={form.employee_id}
+            onChange={changeForm}
+            className="rounded-lg border bg-white p-3"
+          >
+            <option value="">Select employee</option>
+            {employees.map((employee) => (
+              <option key={employee.id} value={employee.id}>
+                {employee.full_name || employee.employee_code} (#{employee.id})
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="grid gap-1 text-sm font-medium text-slate-700">
+          Attendance date
+          <input type="date" name="attendance_date" required value={form.attendance_date}
+            onChange={changeForm} className="rounded-lg border p-3" />
+        </label>
+
+        <label className="grid gap-1 text-sm font-medium text-slate-700">
+          Assigned shift
+          <select
+            name="shift_id"
+            value={form.shift_id}
+            onChange={changeForm}
+            className="rounded-lg border bg-white p-3"
+          >
+            <option value="">No shift assigned</option>
+            {shifts.map((shift) => (
+              <option key={shift.id} value={shift.id}>
+                {shift.name} ({String(shift.start_time).slice(0, 5)}?{String(shift.end_time).slice(0, 5)})
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="grid gap-1 text-sm font-medium text-slate-700">
+          Check-in
+          <input type="datetime-local" name="check_in" value={form.check_in}
+            onChange={changeForm} className="rounded-lg border p-3" />
+        </label>
+
+        <label className="grid gap-1 text-sm font-medium text-slate-700">
+          Check-out
+          <input type="datetime-local" name="check_out" value={form.check_out}
+            onChange={changeForm} className="rounded-lg border p-3" />
+        </label>
+
+        <label className="grid gap-1 text-sm font-medium text-slate-700">
+          Status
+          <select name="status" value={form.status} onChange={changeForm}
+            className="rounded-lg border bg-white p-3">
+            <option>Present</option>
+            <option>Absent</option>
+            <option>Late</option>
+            <option>On Leave</option>
+          </select>
+        </label>
+
+        <label className="grid gap-1 text-sm font-medium text-slate-700">
+          Remarks
+          <input name="remarks" maxLength={500} value={form.remarks}
+            onChange={changeForm} placeholder="Optional remarks"
+            className="rounded-lg border p-3" />
+        </label>
+
+        <div className="flex flex-wrap gap-2 md:col-span-2 xl:col-span-3">
+          <button disabled={saving} type="submit"
+            className="rounded-lg bg-indigo-600 px-5 py-2.5 font-medium text-white disabled:opacity-50">
+            {saving ? "Saving..." : editingId !== null ? "Save changes" : "Add attendance"}
+          </button>
+          {editingId !== null && (
+            <button type="button"
+              onClick={() => { setEditingId(null); setForm(emptyForm); }}
+              className="rounded-lg border px-5 py-2.5">
+              Cancel edit
+            </button>
+          )}
+        </div>
+      </form>
+
+
+      <section className="grid gap-5 rounded-xl border border-slate-200 bg-white p-5 xl:grid-cols-2">
+        <div className="xl:col-span-2">
+          <h2 className="text-lg font-semibold text-slate-900">Shift management</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Create and maintain shifts used for working-hours and overtime calculations.
+          </p>
+        </div>
+
+        <form onSubmit={handleShiftSubmit} className="grid content-start gap-3 sm:grid-cols-2">
+          <h3 className="font-medium sm:col-span-2">
+            {editingShiftId !== null ? "Edit shift" : "Create shift"}
+          </h3>
+
+          <label className="grid gap-1 text-sm text-slate-600 sm:col-span-2">
+            Shift name
+            <input
+              required
+              maxLength={100}
+              value={shiftForm.name}
+              onChange={(event) =>
+                setShiftForm({ ...shiftForm, name: event.target.value })
+              }
+              placeholder="e.g. General Shift"
+              className="rounded-lg border p-3"
+            />
+          </label>
+
+          <label className="grid gap-1 text-sm text-slate-600">
+            Start time
+            <input
+              type="time"
+              required
+              value={shiftForm.start_time}
+              onChange={(event) =>
+                setShiftForm({ ...shiftForm, start_time: event.target.value })
+              }
+              className="rounded-lg border p-3"
+            />
+          </label>
+
+          <label className="grid gap-1 text-sm text-slate-600">
+            End time
+            <input
+              type="time"
+              required
+              value={shiftForm.end_time}
+              onChange={(event) =>
+                setShiftForm({ ...shiftForm, end_time: event.target.value })
+              }
+              className="rounded-lg border p-3"
+            />
+          </label>
+
+          <label className="grid gap-1 text-sm text-slate-600 sm:col-span-2">
+            Unpaid break (minutes)
+            <input
+              type="number"
+              min="0"
+              max="720"
+              required
+              value={shiftForm.break_minutes}
+              onChange={(event) =>
+                setShiftForm({ ...shiftForm, break_minutes: event.target.value })
+              }
+              className="rounded-lg border p-3"
+            />
+          </label>
+
+          <div className="flex flex-wrap gap-2 sm:col-span-2">
+            <button
+              type="submit"
+              disabled={savingShift}
+              className="rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {savingShift
+                ? "Saving..."
+                : editingShiftId !== null
+                  ? "Save shift"
+                  : "Create shift"}
+            </button>
+
+            {editingShiftId !== null && (
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingShiftId(null);
+                  setShiftForm({
+                    name: "",
+                    start_time: "09:00",
+                    end_time: "17:00",
+                    break_minutes: 60,
+                  });
+                }}
+                className="rounded-lg border px-4 py-2.5 text-sm"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+        </form>
+
+        <div className="overflow-x-auto">
+          <h3 className="mb-2 font-medium">Existing shifts</h3>
+          <table className="w-full text-left text-sm">
+            <thead className="bg-slate-50 text-slate-600">
+              <tr>
+                <th className="px-3 py-2">Shift</th>
+                <th className="px-3 py-2">Hours</th>
+                <th className="px-3 py-2">Break</th>
+                <th className="px-3 py-2">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {shifts.length === 0 ? (
+                <tr>
+                  <td colSpan="4" className="p-5 text-center text-slate-500">
+                    No shifts configured yet.
+                  </td>
+                </tr>
+              ) : shifts.map((shift) => (
+                <tr key={shift.id}>
+                  <td className="px-3 py-3 font-medium">{shift.name}</td>
+                  <td className="whitespace-nowrap px-3 py-3">
+                    {String(shift.start_time).slice(0, 5)}?{String(shift.end_time).slice(0, 5)}
+                  </td>
+                  <td className="px-3 py-3">{shift.break_minutes}m</td>
+                  <td className="whitespace-nowrap px-3 py-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingShiftId(shift.id);
+                        setShiftForm({
+                          name: shift.name,
+                          start_time: String(shift.start_time).slice(0, 5),
+                          end_time: String(shift.end_time).slice(0, 5),
+                          break_minutes: shift.break_minutes,
+                        });
+                      }}
+                      className="mr-3 font-medium text-indigo-600"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteShift(shift)}
+                      className="font-medium text-red-600"
+                    >
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5">
+        <div>
+          <h2 className="text-lg font-semibold text-slate-900">Attendance reports</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Review attendance counts, recorded working time, and assigned-shift overtime.
+          </p>
+        </div>
+
+        <form onSubmit={loadReport} className="grid gap-3 sm:grid-cols-3">
+          <label className="grid gap-1 text-sm text-slate-600">
+            Start date
+            <input
+              type="date"
+              required
+              value={reportStartDate}
+              max={reportEndDate}
+              onChange={(event) => setReportStartDate(event.target.value)}
+              className="rounded-lg border p-3"
+            />
+          </label>
+          <label className="grid gap-1 text-sm text-slate-600">
+            End date
+            <input
+              type="date"
+              required
+              value={reportEndDate}
+              min={reportStartDate}
+              onChange={(event) => setReportEndDate(event.target.value)}
+              className="rounded-lg border p-3"
+            />
+          </label>
+          <div className="flex items-end">
+            <button
+              type="submit"
+              disabled={reportLoading}
+              className="w-full rounded-lg bg-indigo-600 px-4 py-3 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {reportLoading ? "Loading report..." : "Generate report"}
+            </button>
+          </div>
+        </form>
+
+        {reportError && (
+          <div role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            {reportError}
+          </div>
+        )}
+
+        {attendanceReport && (
+          <>
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              {[
+                ["Total records", attendanceReport.total_records ?? 0],
+                ["Present", attendanceReport.counts?.Present ?? 0],
+                ["Absent", attendanceReport.counts?.Absent ?? 0],
+                ["Late", attendanceReport.counts?.Late ?? 0],
+                ["Worked", formatMinutes(attendanceReport.total_worked_minutes)],
+                ["Overtime", formatMinutes(attendanceReport.total_overtime_minutes)],
+              ].map(([label, value]) => (
+                <article key={label} className="rounded-lg bg-slate-50 p-3">
+                  <p className="text-xs text-slate-500">{label}</p>
+                  <p className="mt-1 text-lg font-semibold text-slate-900">{value}</p>
+                </article>
+              ))}
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-slate-50 text-slate-600">
+                  <tr>
+                    <th className="px-3 py-2">Date</th>
+                    <th className="px-3 py-2">Records</th>
+                    <th className="px-3 py-2">Present</th>
+                    <th className="px-3 py-2">Absent</th>
+                    <th className="px-3 py-2">Worked</th>
+                    <th className="px-3 py-2">Overtime</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {(attendanceReport.daily_summary || []).map((day) => (
+                    <tr key={day.date}>
+                      <td className="whitespace-nowrap px-3 py-2">{day.date}</td>
+                      <td className="px-3 py-2">{day.total_records}</td>
+                      <td className="px-3 py-2">{day.counts?.Present ?? 0}</td>
+                      <td className="px-3 py-2">{day.counts?.Absent ?? 0}</td>
+                      <td className="px-3 py-2">
+                        {day.worked_records ? formatMinutes(day.worked_minutes) : "?"}
+                      </td>
+                      <td className="px-3 py-2">
+                        {day.overtime_records ? formatMinutes(day.overtime_minutes) : "?"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </section>
+
+      <div className="grid gap-3 rounded-xl border bg-white p-4 md:grid-cols-3">
+        <label className="grid gap-1 text-sm text-slate-600">
+          Filter by date
+          <input type="date" value={filterDate}
+            onChange={(e) => setFilterDate(e.target.value)}
+            className="rounded-lg border p-3" />
+        </label>
+        <label className="grid gap-1 text-sm text-slate-600">
+          Filter by status
+          <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}
+            className="rounded-lg border bg-white p-3">
+            <option value="">All statuses</option>
+            <option>Present</option>
+            <option>Absent</option>
+            <option>Late</option>
+            <option>On Leave</option>
+          </select>
+        </label>
+        <label className="grid gap-1 text-sm text-slate-600">
+          Filter by employee
+          <select value={filterEmployee} onChange={(e) => setFilterEmployee(e.target.value)}
+            className="rounded-lg border bg-white p-3">
+            <option value="">All employees</option>
+            {employees.map((employee) => (
+              <option key={employee.id} value={employee.id}>
+                {employee.full_name || employee.employee_code}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className="overflow-x-auto rounded-xl border bg-white">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-slate-50 text-slate-600">
+            <tr>
+              {["ID", "Employee", "Date", "Check-in", "Check-out", "Status", "Shift", "Worked", "Overtime", "Actions"].map((heading) => (
+                <th key={heading} className="whitespace-nowrap px-4 py-3 font-semibold">{heading}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y">
+            {loading ? (
+              <tr><td colSpan="10" className="p-8 text-center">Loading attendance...</td></tr>
+            ) : records.length === 0 ? (
+              <tr><td colSpan="10" className="p-8 text-center text-slate-500">No attendance records for these filters.</td></tr>
+            ) : records.map((record) => {
+              const employee = employees.find((item) => Number(item.id) === Number(record.employee_id));
+              return (
+                <tr key={record.id} className="hover:bg-slate-50">
+                  <td className="whitespace-nowrap px-4 py-3">{record.id}</td>
+                  <td className="whitespace-nowrap px-4 py-3">
+                    <div className="font-medium">{employee?.full_name || `Employee #${record.employee_id}`}</div>
+                    <div className="text-xs text-slate-500">ID: {record.employee_id}</div>
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3">{record.attendance_date}</td>
+                  <td className="whitespace-nowrap px-4 py-3">
+                    {record.check_in ? new Date(record.check_in).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3">
+                    {record.check_out ? new Date(record.check_out).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3">
+                    <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium">{record.status}</span>
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3">
+                    {record.shift_name || "?"}
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3">
+                    {formatMinutes(record.worked_minutes)}
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3">
+                    {formatMinutes(record.overtime_minutes)}
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3">
+                    <button onClick={() => startEdit(record)} className="mr-3 font-medium text-indigo-600">Edit</button>
+                    <button onClick={() => handleDelete(record)} className="font-medium text-red-600">Delete</button>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {!record.check_in && (
+                        <button
+                          onClick={() => handlePunch(record.employee_id, "in")}
+                          className="rounded border border-emerald-300 px-2 py-1 text-xs text-emerald-700 hover:bg-emerald-50"
+                        >
+                          Check-in
+                        </button>
+                      )}
+
+                      {record.check_in && !record.check_out && (
+                        <button
+                          onClick={() => handlePunch(record.employee_id, "out")}
+                          className="rounded border border-indigo-300 px-2 py-1 text-xs text-indigo-700 hover:bg-indigo-50"
+                        >
+                          Check-out
+                        </button>
+                      )}
+
+                      {record.check_in && record.check_out && (
+                        <span className="rounded-full bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">
+                          Completed
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
