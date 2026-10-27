@@ -7,6 +7,7 @@ import Login from "./pages/Login";
 import Employees from "./pages/Employees";
 import Departments from "./pages/Departments";
 import PredictionHistory from "./pages/PredictionHistory";
+import AIRiskMonitoring from "./pages/AIRiskMonitoring";
 import Attendance from "./pages/Attendance";
 import LeaveManagement from "./pages/LeaveManagement";
 import { getPredictionHistory } from "./api/predictionHistory";
@@ -46,6 +47,7 @@ const nav = [
   { label: "Departments", icon: Building2 },
   { label: "AI Predictions", icon: BrainCircuit },
   { label: "Prediction History", icon: History },
+  { label: "AI Risk Monitoring", icon: Activity },
   { label: "Attendance", icon: Activity },
   { label: "Leave Management", icon: CalendarDays },
 ];
@@ -66,7 +68,7 @@ function App() {
   );
 
   useEffect(() => {
-    if (!isHR && ["Employees", "Departments"].includes(page)) {
+    if (!isHR && ["Employees", "Departments", "AI Risk Monitoring"].includes(page)) {
       setPage("Overview");
     }
   }, [isHR, page]);
@@ -381,7 +383,7 @@ function App() {
 
         <div className="workspace-label">WORKSPACE</div>
         <nav>
-          {nav.filter(item => isHR || !["Employees", "Departments"].includes(item.label)).map(item => (
+          {nav.filter(item => isHR || !["Employees", "Departments", "AI Risk Monitoring"].includes(item.label)).map(item => (
             <button key={item.label}
               className={`nav-item ${page === item.label ? "active" : ""}`}
               onClick={() => { setPage(item.label); setSidebarOpen(false); }}>
@@ -740,6 +742,10 @@ function App() {
           {isHR && page === "Departments" && <Departments /> }
 
           {page === "AI Predictions" && <section className="prediction-layout"><article className="panel page-panel"><div className="panel-heading"><div><h2><BrainCircuit size={21} className="inline-icon"/> Attrition prediction</h2><p>Submit employee attributes to the backend ML model.</p></div><span className="model-badge">ML MODEL</span></div><form className="prediction-form" onSubmit={predictAttrition}>{Object.entries(form).map(([key,value])=><label key={key}>{key.replaceAll("_"," ")}{key==="overtime"?<select value={value} onChange={e=>setForm({...form,[key]:e.target.value})}><option>Yes</option><option>No</option></select>:<input type="number" min={key==="job_satisfaction"||key==="work_life_balance"?1:0} max={key==="job_satisfaction"||key==="work_life_balance"?4:undefined} required value={value} onChange={e=>setForm({...form,[key]:e.target.value})}/>}</label>)}<button className="primary-button" disabled={prediction?.loading}>{prediction?.loading?"Predicting...":"Run attrition prediction"} <ArrowUpRight size={17}/></button></form></article><article className="panel prediction-result"><div className="result-icon"><BrainCircuit size={25}/></div><h2>Prediction result</h2><p>Run a prediction to view the response from your API.</p>{prediction?.error&&<div className="error-box">{prediction.error}<p>Check that the backend is running and your login token is valid.</p></div>}{prediction&&!prediction.error&&!prediction.loading&&<div className="result-data"><div className="result-risk">{String(prediction.risk_level??(prediction.predicted_attrition?"High":"Low")).replaceAll("_"," ")}</div><div>Employee ID: {prediction.employee_id}</div>{prediction.predicted_attrition!==undefined&&<div>Predicted attrition: {String(prediction.predicted_attrition)}</div>}{prediction.risk_score!==undefined&&<div>Risk score: {prediction.risk_score}</div>}<pre>{JSON.stringify(prediction,null,2)}</pre></div>}<div className="result-disclaimer">Model outputs support workforce analysis; they should not be used alone to make employment decisions.</div></article></section>}
+
+          {isHR && page === "AI Risk Monitoring" && (
+            <AIRiskMonitoring departments={liveDepartments} />
+          )}
 
           {page === "Prediction History" && <PredictionHistory />}
 

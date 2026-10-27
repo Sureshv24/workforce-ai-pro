@@ -1,4 +1,4 @@
-﻿from app.models.user import User
+from app.models.user import User
 from app.models.department import Department
 from app.models.employee import Employee
 from app.models.attrition_prediction import AttritionPrediction
@@ -7,3 +7,9 @@ from app.models.attendance import Attendance
 from app.models.leave import LeaveRequest
 
 from app.models.leave_balance import LeaveBalance
+from app.models.payroll import Payroll
+from app.models.notification import Notification
+from app.models.chat_message import ChatMessage
+from app.models.document import EmployeeDocument
+
+from app.models.risk_monitoring_event import RiskMonitoringEvent

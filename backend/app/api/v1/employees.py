@@ -5,6 +5,7 @@ from sqlalchemy import select, or_
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.permissions import require_manager_of_employee
 from app.db.session import get_db
 from app.models.user import User
 from app.models.employee import Employee
@@ -66,9 +67,25 @@ def list_employees(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    require_hr(current_user)
-
+    role = (current_user.role or "").strip().upper()
     query = select(Employee)
+
+    if role in ("ADMIN", "HR"):
+        pass
+    elif role == "MANAGER":
+        if current_user.employee_id is None:
+            raise HTTPException(
+                status_code=403,
+                detail="Manager account must be linked to an employee record.",
+            )
+        query = query.where(
+            Employee.manager_id == current_user.employee_id
+        )
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail="Admin, HR, or Manager permission required.",
+        )
 
     if search:
         term = f"%{search.strip()}%"
@@ -127,11 +144,15 @@ def get_employee(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    require_hr(current_user)
-
     employee = db.get(Employee, employee_id)
     if employee is None:
         raise HTTPException(status_code=404, detail="Employee not found")
+
+    require_manager_of_employee(
+        current_user,
+        employee.id,
+        employee.manager_id,
+    )
 
     return employee
 

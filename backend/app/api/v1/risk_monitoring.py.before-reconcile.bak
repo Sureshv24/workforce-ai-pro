@@ -1,0 +1,309 @@
+from datetime import date, datetime, time, timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_current_user
+from app.db.session import get_db
+from app.models.attrition_prediction import AttritionPrediction
+from app.models.department import Department
+from app.models.employee import Employee
+from app.models.user import User
+
+router = APIRouter(
+    prefix="/predictions/monitoring",
+    tags=["AI Risk Monitoring"],
+)
+
+ALLOWED_ROLES = ("ADMIN", "HR")
+RISK_LEVELS = ("Low", "Medium", "High")
+
+
+def require_hr_access(user: User) -> None:
+    if user.role not in ALLOWED_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="AI risk monitoring requires Admin or HR permission",
+        )
+
+
+def period_start(period: str) -> date:
+    today = date.today()
+
+    if period == "last_7_days":
+        return today - timedelta(days=6)
+    if period == "last_30_days":
+        return today - timedelta(days=29)
+    if period == "last_90_days":
+        return today - timedelta(days=89)
+
+    raise HTTPException(
+        status_code=422,
+        detail="period must be last_7_days, last_30_days, or last_90_days",
+    )
+
+
+def latest_prediction_ids():
+    latest_created_at = (
+        select(
+            AttritionPrediction.employee_id.label("employee_id"),
+            func.max(AttritionPrediction.created_at).label("latest_at"),
+        )
+        .where(AttritionPrediction.employee_id.is_not(None))
+        .group_by(AttritionPrediction.employee_id)
+        .subquery()
+    )
+
+    return (
+        select(
+            AttritionPrediction.employee_id.label("employee_id"),
+            func.max(AttritionPrediction.id).label("prediction_id"),
+        )
+        .join(
+            latest_created_at,
+            (AttritionPrediction.employee_id == latest_created_at.c.employee_id)
+            & (AttritionPrediction.created_at == latest_created_at.c.latest_at),
+        )
+        .group_by(AttritionPrediction.employee_id)
+        .subquery()
+    )
+
+
+@router.get("/summary")
+def risk_monitoring_summary(
+    department_id: int | None = Query(default=None, gt=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_hr_access(current_user)
+
+    query = select(
+        AttritionPrediction.risk_level,
+        func.count(AttritionPrediction.id),
+    )
+
+    if department_id is not None:
+        query = (
+            query.join(
+                Employee,
+                AttritionPrediction.employee_id == Employee.id,
+            )
+            .where(Employee.department_id == department_id)
+        )
+
+    rows = db.execute(query.group_by(AttritionPrediction.risk_level)).all()
+    counts = {level: 0 for level in RISK_LEVELS}
+
+    for level, count in rows:
+        if level in counts:
+            counts[level] = int(count)
+
+    return {
+        "basis": "saved_predictions",
+        "department_id": department_id,
+        "total_predictions": sum(counts.values()),
+        "risk_counts": counts,
+    }
+
+
+@router.get("/high-risk-employees")
+def high_risk_employees(
+    department_id: int | None = Query(default=None, gt=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_hr_access(current_user)
+
+    latest = latest_prediction_ids()
+
+    query = (
+        select(
+            AttritionPrediction.id,
+            AttritionPrediction.employee_id,
+            Employee.employee_code,
+            Employee.full_name,
+            Employee.department_id,
+            Department.name.label("department_name"),
+            AttritionPrediction.risk_score,
+            AttritionPrediction.risk_level,
+            AttritionPrediction.predicted_attrition,
+            AttritionPrediction.created_at,
+        )
+        .join(latest, AttritionPrediction.id == latest.c.prediction_id)
+        .join(Employee, AttritionPrediction.employee_id == Employee.id)
+        .outerjoin(Department, Employee.department_id == Department.id)
+        .where(AttritionPrediction.risk_level == "High")
+    )
+
+    if department_id is not None:
+        query = query.where(Employee.department_id == department_id)
+
+    rows = db.execute(
+        query.order_by(
+            AttritionPrediction.risk_score.desc(),
+            AttritionPrediction.created_at.desc(),
+        ).limit(limit)
+    ).all()
+
+    return {
+        "basis": "latest_saved_prediction_per_employee",
+        "department_id": department_id,
+        "count": len(rows),
+        "items": [
+            {
+                "prediction_id": row.id,
+                "employee_id": row.employee_id,
+                "employee_code": row.employee_code,
+                "employee_name": row.full_name,
+                "department_id": row.department_id,
+                "department_name": row.department_name,
+                "risk_score": row.risk_score,
+                "risk_level": row.risk_level,
+                "predicted_attrition": row.predicted_attrition,
+                "predicted_at": row.created_at.isoformat(),
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.get("/trends")
+def risk_monitoring_trends(
+    period: str = Query(default="last_30_days"),
+    department_id: int | None = Query(default=None, gt=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_hr_access(current_user)
+
+    start = period_start(period)
+    today = date.today()
+    start_dt = datetime.combine(start, time.min)
+    end_dt = datetime.combine(today + timedelta(days=1), time.min)
+
+    query = (
+        select(
+            func.date(AttritionPrediction.created_at).label("prediction_date"),
+            AttritionPrediction.risk_level,
+            func.count(AttritionPrediction.id),
+        )
+        .where(
+            AttritionPrediction.created_at >= start_dt,
+            AttritionPrediction.created_at < end_dt,
+        )
+    )
+
+    if department_id is not None:
+        query = (
+            query.join(
+                Employee,
+                AttritionPrediction.employee_id == Employee.id,
+            )
+            .where(Employee.department_id == department_id)
+        )
+
+    rows = db.execute(
+        query.group_by(
+            func.date(AttritionPrediction.created_at),
+            AttritionPrediction.risk_level,
+        ).order_by(func.date(AttritionPrediction.created_at))
+    ).all()
+
+    buckets = {}
+    for offset in range((today - start).days + 1):
+        day = start + timedelta(days=offset)
+        buckets[day.isoformat()] = {
+            "date": day.isoformat(),
+            "Low": 0,
+            "Medium": 0,
+            "High": 0,
+        }
+
+    for prediction_date, level, count in rows:
+        if prediction_date is None or level not in RISK_LEVELS:
+            continue
+
+        day_key = str(prediction_date)[:10]
+        if day_key in buckets:
+            buckets[day_key][level] = int(count)
+
+    return {
+        "basis": "prediction_creation_date",
+        "period": period,
+        "period_start": start.isoformat(),
+        "period_end": today.isoformat(),
+        "department_id": department_id,
+        "trends": list(buckets.values()),
+    }
+
+
+@router.get("/events")
+def risk_monitoring_events(
+    department_id: int | None = Query(default=None, gt=0),
+    employee_id: int | None = Query(default=None, gt=0),
+    event_type: str | None = Query(default=None, max_length=40),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_hr_access(current_user)
+
+    from app.models.risk_monitoring_event import RiskMonitoringEvent
+
+    query = (
+        select(
+            RiskMonitoringEvent,
+            Employee.employee_code,
+            Employee.full_name,
+            Department.name.label("department_name"),
+        )
+        .join(Employee, Employee.id == RiskMonitoringEvent.employee_id)
+        .outerjoin(Department, Department.id == Employee.department_id)
+    )
+
+    if department_id is not None:
+        query = query.where(Employee.department_id == department_id)
+    if employee_id is not None:
+        query = query.where(RiskMonitoringEvent.employee_id == employee_id)
+    if event_type:
+        query = query.where(RiskMonitoringEvent.event_type == event_type.upper())
+
+    total = db.scalar(
+        select(func.count()).select_from(query.subquery())
+    ) or 0
+
+    rows = db.execute(
+        query.order_by(
+            RiskMonitoringEvent.created_at.desc(),
+            RiskMonitoringEvent.id.desc(),
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+
+    return {
+        "total": int(total),
+        "page": page,
+        "page_size": page_size,
+        "items": [
+            {
+                "id": event.id,
+                "prediction_id": event.prediction_id,
+                "employee_id": event.employee_id,
+                "employee_code": employee_code,
+                "employee_name": full_name,
+                "department_name": department_name,
+                "previous_risk_level": event.previous_risk_level,
+                "current_risk_level": event.current_risk_level,
+                "previous_risk_score": event.previous_risk_score,
+                "current_risk_score": event.current_risk_score,
+                "event_type": event.event_type,
+                "triggered_by": event.triggered_by,
+                "created_at": event.created_at.isoformat(),
+            }
+            for event, employee_code, full_name, department_name in rows
+        ],
+    }

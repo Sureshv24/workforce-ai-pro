@@ -1,4 +1,4 @@
-﻿from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field
 
 
 class RegisterRequest(BaseModel):
@@ -23,3 +23,22 @@ class UserResponse(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ForgotPasswordResponse(BaseModel):
+    message: str
+    # Returned only in DEBUG mode when SMTP isn't configured or delivery fails.
+    debug_reset_url: str | None = None
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=20, max_length=256)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class ResetPasswordResponse(BaseModel):
+    message: str

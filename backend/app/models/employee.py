@@ -15,6 +15,19 @@ class Employee(Base):
     department_id: Mapped[int | None] = mapped_column(
         ForeignKey("departments.id"), nullable=True
     )
+    manager_id: Mapped[int | None] = mapped_column(
+        ForeignKey("employees.id", ondelete="SET NULL", name="fk_employees_manager_id_employees"),
+        nullable=True,
+        index=True,
+    )
+    manager: Mapped["Employee | None"] = relationship(
+        "Employee", remote_side="Employee.id",
+        foreign_keys=[manager_id], back_populates="direct_reports"
+    )
+    direct_reports: Mapped[list["Employee"]] = relationship(
+        "Employee", foreign_keys=[manager_id],
+        back_populates="manager"
+    )
     job_title: Mapped[str | None] = mapped_column(String(100), nullable=True)
     hire_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     exit_date: Mapped[date | None] = mapped_column(Date, nullable=True)

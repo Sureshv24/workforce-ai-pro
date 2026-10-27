@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { getEmployees } from "../api/employees";
 import {
   getAttendance,
@@ -425,7 +425,8 @@ export default function Attendance() {
         ))}
       </div>
 
-{isHR && (\n      <form onSubmit={handleSubmit} className="grid gap-4 rounded-xl border bg-white p-5 md:grid-cols-2 xl:grid-cols-3">
+{isHR && (
+      <form onSubmit={handleSubmit} className="grid gap-4 rounded-xl border bg-white p-5 md:grid-cols-2 xl:grid-cols-3">
         <h2 className="text-lg font-semibold md:col-span-2 xl:col-span-3">
           {editingId !== null ? "Edit attendance" : "Add attendance"}
         </h2>
@@ -515,10 +516,12 @@ export default function Attendance() {
             </button>
           )}
         </div>
-      </form>\n      )}
+      </form>
+      )}
 
 
-{isHR && (\n      <section className="grid gap-5 rounded-xl border border-slate-200 bg-white p-5 xl:grid-cols-2">
+{isHR && (
+      <section className="grid gap-5 rounded-xl border border-slate-200 bg-white p-5 xl:grid-cols-2">
         <div className="xl:col-span-2">
           <h2 className="text-lg font-semibold text-slate-900">Shift management</h2>
           <p className="mt-1 text-sm text-slate-500">
@@ -675,7 +678,10 @@ export default function Attendance() {
         </div>
       </section>
 
-      )}\n\n{isHR && (\n      <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5">
+      )}
+
+{isHR && (
+      <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5">
         <div>
           <h2 className="text-lg font-semibold text-slate-900">Attendance reports</h2>
           <p className="mt-1 text-sm text-slate-500">
@@ -775,7 +781,9 @@ export default function Attendance() {
         )}
       </section>
 
-      )}\n\n      <div className="grid gap-3 rounded-xl border bg-white p-4 md:grid-cols-3">
+      )}
+
+      <div className="grid gap-3 rounded-xl border bg-white p-4 md:grid-cols-3">
         <label className="grid gap-1 text-sm text-slate-600">
           Filter by date
           <input type="date" value={filterDate}

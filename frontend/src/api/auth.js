@@ -1,11 +1,7 @@
-﻿import api from "./client";
+import api from "./client";
 
 export async function login(email, password) {
-  const response = await api.post("/auth/login", {
-    email,
-    password,
-  });
-
+  const response = await api.post("/auth/login", { email, password });
   const { access_token, token_type } = response.data;
 
   if (!access_token) {
@@ -14,10 +10,8 @@ export async function login(email, password) {
 
   localStorage.setItem("access_token", access_token);
 
-  // Fetch the authenticated user and their role.
   try {
     const userResponse = await api.get("/auth/me");
-
     localStorage.setItem("user", JSON.stringify(userResponse.data));
 
     return {
@@ -27,8 +21,22 @@ export async function login(email, password) {
     };
   } catch (error) {
     localStorage.removeItem("access_token");
+    localStorage.removeItem("user");
     throw error;
   }
+}
+
+export async function forgotPassword(email) {
+  const response = await api.post("/auth/forgot-password", { email });
+  return response.data;
+}
+
+export async function resetPassword(token, newPassword) {
+  const response = await api.post("/auth/reset-password", {
+    token,
+    new_password: newPassword,
+  });
+  return response.data;
 }
 
 export function logout() {
